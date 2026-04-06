@@ -101,54 +101,114 @@ def find_common_length(token_sequences, direction='left'):
     return min_len
 
 
-def stack_sequences(tokens, pad_token_id):
+def _tokenizer_has_modifiers(tokenizer):
+    return bool(
+        hasattr(tokenizer, "has_compositional_mode")
+        and tokenizer.has_compositional_mode()
+    )
+
+
+def _encode_prompts(tokenizer, prompts):
+    bos_token_id = tokenizer.get_bos_token_id()
+    if _tokenizer_has_modifiers(tokenizer):
+        encoded = tokenizer.encode_with_modifiers(prompts, prepend=bos_token_id)
+        tokens = [token_ids for token_ids, _modifier_rows in encoded]
+        modifier_rows = [modifier_rows for _token_ids, modifier_rows in encoded]
+        return tokens, modifier_rows
+    tokens = tokenizer(prompts, prepend=bos_token_id)
+    return tokens, None
+
+
+def _sequence_units(tokens, modifier_rows):
+    if modifier_rows is None:
+        return tokens
+    return [
+        (int(token_id), tuple(int(v) for v in modifier_row))
+        for token_id, modifier_row in zip(tokens, modifier_rows)
+    ]
+
+
+def stack_sequences(tokens, pad_token_id, modifier_rows=None, default_modifier=None):
     """Stack up a list of token sequences, pad to longest on the right"""
     bsz, seq_len = len(tokens), max(len(x) for x in tokens)
     input_ids = torch.full((bsz, seq_len), pad_token_id, dtype=torch.long)
+    modifier_ids = None
+    if modifier_rows is not None:
+        assert default_modifier is not None, "default_modifier is required when stacking modifier rows"
+        num_groups = len(default_modifier)
+        modifier_ids = torch.full(
+            (bsz, seq_len, num_groups),
+            0,
+            dtype=torch.long,
+        )
+        modifier_ids[:] = torch.tensor(default_modifier, dtype=torch.long)
     for i, x in enumerate(tokens):
         input_ids[i, :len(x)] = torch.tensor(x, dtype=torch.long)
-    return input_ids
+        if modifier_ids is not None:
+            modifier_ids[i, :len(x)] = torch.tensor(modifier_rows[i], dtype=torch.long)
+    return input_ids, modifier_ids
 
 
 def batch_sequences_mc(tokenizer, prompts):
     # In multiple choice, contexts are the same but the continuation is different (common prefix)
-    tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
+    tokens, modifier_rows = _encode_prompts(tokenizer, prompts)
     # figure out the start and end of each continuation
-    answer_start_idx = find_common_length(tokens, direction='left')
+    answer_start_idx = find_common_length(
+        [_sequence_units(token_ids, row_ids) for token_ids, row_ids in zip(tokens, modifier_rows or [None] * len(tokens))],
+        direction='left',
+    )
     start_indices = [answer_start_idx] * len(prompts)
     end_indices = [len(x) for x in tokens]
-    return tokens, start_indices, end_indices
+    return tokens, modifier_rows, start_indices, end_indices
 
 
 def batch_sequences_schema(tokenizer, prompts):
     # In schema tasks, contexts vary but continuation is the same (common suffix)
-    tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
+    tokens, modifier_rows = _encode_prompts(tokenizer, prompts)
     # figure out the start and end of each context
-    suffix_length = find_common_length(tokens, direction='right')
+    suffix_length = find_common_length(
+        [_sequence_units(token_ids, row_ids) for token_ids, row_ids in zip(tokens, modifier_rows or [None] * len(tokens))],
+        direction='right',
+    )
     end_indices = [len(x) for x in tokens]
     start_indices = [ei - suffix_length for ei in end_indices]
-    return tokens, start_indices, end_indices
+    return tokens, modifier_rows, start_indices, end_indices
 
 
 def batch_sequences_lm(tokenizer, prompts):
     # In LM tasks, we have two prompts: without and with continuation
-    tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
+    tokens, modifier_rows = _encode_prompts(tokenizer, prompts)
     tokens_without, tokens_with = tokens
+    mods_without = None if modifier_rows is None else modifier_rows[0]
+    mods_with = None if modifier_rows is None else modifier_rows[1]
     start_idx, end_idx = len(tokens_without), len(tokens_with)
     assert start_idx < end_idx, "prompt without is supposed to be a prefix of prompt with"
     assert tokens_without == tokens_with[:start_idx], "prompt without is supposed to be a prefix of prompt with"
+    if modifier_rows is not None:
+        assert mods_without == mods_with[:start_idx], "modifier rows without continuation must prefix the full prompt"
     # we only need the with continuation prompt in the LM task, i.e. batch size of 1
-    return [tokens_with], [start_idx], [end_idx]
+    out_modifiers = None if modifier_rows is None else [mods_with]
+    return [tokens_with], out_modifiers, [start_idx], [end_idx]
 
 
 @torch.no_grad()
-def forward_model(model, input_ids):
+def forward_model(model, input_ids, modifier_ids=None):
     """
     Take BxT tensor of token ids, return BxT tensor of losses and argmax predictions.
     The last column of losses is set to nan because we don't have autoregressive targets there.
     """
     batch_size, seq_len = input_ids.size()
-    outputs = model(input_ids)
+    if modifier_ids is None:
+        outputs = model(input_ids)
+        prediction_modifier_ids = None
+    else:
+        outputs, hidden = model(input_ids, modifier_ids=modifier_ids, return_hidden=True)
+        prediction_base_ids = outputs.argmax(dim=-1)
+        pred_modifier_logits = model.get_modifier_logits(hidden, prediction_base_ids)
+        prediction_modifier_ids = torch.stack(
+            [group_logits.argmax(dim=-1) for group_logits in pred_modifier_logits],
+            dim=-1,
+        )
     # Roll the tensor to the left by one position to get the (autoregressive) target ids
     target_ids = torch.roll(input_ids, shifts=-1, dims=1)
     # Calculate cross entropy at all positions
@@ -157,11 +217,24 @@ def forward_model(model, input_ids):
         target_ids.view(batch_size * seq_len),
         reduction='none'
     ).view(batch_size, seq_len)
+    if modifier_ids is not None:
+        target_modifier_ids = torch.roll(modifier_ids, shifts=-1, dims=1)
+        safe_target_ids = target_ids.clone()
+        modifier_logits = model.get_modifier_logits(hidden, safe_target_ids)
+        modifier_loss = None
+        for group_idx, group_logits in enumerate(modifier_logits):
+            group_loss = torch.nn.functional.cross_entropy(
+                group_logits.view(batch_size * seq_len, -1),
+                target_modifier_ids[..., group_idx].reshape(batch_size * seq_len),
+                reduction='none',
+            ).view(batch_size, seq_len)
+            modifier_loss = group_loss if modifier_loss is None else modifier_loss + group_loss
+        losses = losses + (modifier_loss / len(modifier_logits))
     # Set the last column to be nan because there is no autoregressive loss there
     losses[:, -1] = float('nan')
     # Get the argmax predictions at each position
     predictions = outputs.argmax(dim=-1)
-    return losses, predictions
+    return losses, predictions, prediction_modifier_ids
 
 
 @torch.no_grad()
@@ -183,13 +256,13 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     # Render prompts and batch sequences based on task type
     if task_type == 'multiple_choice':
         prompts = render_prompts_mc(item, continuation_delimiter, fewshot_examples)
-        tokens, start_idxs, end_idxs = batch_sequences_mc(tokenizer, prompts)
+        tokens, modifier_rows, start_idxs, end_idxs = batch_sequences_mc(tokenizer, prompts)
     elif task_type == 'schema':
         prompts = render_prompts_schema(item, continuation_delimiter, fewshot_examples)
-        tokens, start_idxs, end_idxs = batch_sequences_schema(tokenizer, prompts)
+        tokens, modifier_rows, start_idxs, end_idxs = batch_sequences_schema(tokenizer, prompts)
     elif task_type == 'language_modeling':
         prompts = render_prompts_lm(item, continuation_delimiter, fewshot_examples)
-        tokens, start_idxs, end_idxs = batch_sequences_lm(tokenizer, prompts)
+        tokens, modifier_rows, start_idxs, end_idxs = batch_sequences_lm(tokenizer, prompts)
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
 
@@ -197,28 +270,37 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     # In these cases, we have to truncate sequences to max length and adjust the indices
     if hasattr(model, 'max_seq_len') and model.max_seq_len is not None:
         max_tokens = model.max_seq_len
-        new_tokens, new_start_idxs, new_end_idxs = [], [], []
-        for t, s, e in zip(tokens, start_idxs, end_idxs):
+        new_tokens, new_modifier_rows, new_start_idxs, new_end_idxs = [], [], [], []
+        modifier_iter = modifier_rows if modifier_rows is not None else [None] * len(tokens)
+        for t, row_ids, s, e in zip(tokens, modifier_iter, start_idxs, end_idxs):
             if len(t) > max_tokens:
                 num_to_crop = len(t) - max_tokens
                 new_tokens.append(t[-max_tokens:]) # take the last max_tokens tokens
+                if row_ids is not None:
+                    new_modifier_rows.append(row_ids[-max_tokens:])
                 new_start_idxs.append(s - num_to_crop) # shift the indices down
                 new_end_idxs.append(e - num_to_crop)
                 assert s - num_to_crop >= 0, "this should never happen right?"
                 assert e - num_to_crop >= 0, "this should never happen right?"
             else:
                 new_tokens.append(t) # keep unchanged
+                if row_ids is not None:
+                    new_modifier_rows.append(row_ids)
                 new_start_idxs.append(s)
                 new_end_idxs.append(e)
         tokens, start_idxs, end_idxs = new_tokens, new_start_idxs, new_end_idxs
+        modifier_rows = None if modifier_rows is None else new_modifier_rows
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
-    input_ids = stack_sequences(tokens, pad_token_id)
+    default_modifier = tokenizer.get_default_modifier() if modifier_rows is not None else None
+    input_ids, input_modifier_ids = stack_sequences(tokens, pad_token_id, modifier_rows, default_modifier)
     input_ids = input_ids.to(device)
+    if input_modifier_ids is not None:
+        input_modifier_ids = input_modifier_ids.to(device)
 
     # Forward the model, get the autoregressive loss and argmax prediction at each token
-    losses, predictions = forward_model(model, input_ids)
+    losses, predictions, prediction_modifier_ids = forward_model(model, input_ids, input_modifier_ids)
 
     # See if the losses/predictions come out correctly
     if task_type == 'language_modeling':
@@ -229,6 +311,10 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         predicted_tokens = predictions[0, si-1:ei-1]
         actual_tokens = input_ids[0, si:ei]
         is_correct = torch.all(predicted_tokens == actual_tokens).item()
+        if is_correct and prediction_modifier_ids is not None:
+            predicted_modifiers = prediction_modifier_ids[0, si-1:ei-1]
+            actual_modifiers = input_modifier_ids[0, si:ei]
+            is_correct = torch.all(predicted_modifiers == actual_modifiers).item()
     elif task_type in ['multiple_choice', 'schema']:
         # For MC/schema: find the option with lowest average loss
         mean_losses = [losses[i, si-1:ei-1].mean().item()

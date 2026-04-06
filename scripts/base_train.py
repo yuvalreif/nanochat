@@ -129,11 +129,6 @@ modifier_group_sizes = tuple(tokenizer.get_modifier_group_sizes()) if compositio
 user_config["compositional_mode"] = compositional_mode
 user_config["modifier_group_sizes"] = list(modifier_group_sizes)
 if compositional_mode:
-    if args.core_metric_every > 0:
-        raise ValueError(
-            "Compositional raw training is not wired into CORE yet. "
-            "Re-run with --core-metric-every=-1."
-        )
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
 
 # -----------------------------------------------------------------------------

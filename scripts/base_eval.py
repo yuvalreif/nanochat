@@ -216,12 +216,6 @@ def main():
         and hasattr(tokenizer, "has_compositional_mode")
         and tokenizer.has_compositional_mode()
     )
-    if compositional_mode and ('core' in eval_modes):
-        raise ValueError(
-            "Compositional base_eval does not support CORE yet. "
-            "Re-run without core in --eval."
-        )
-
     print0(f"Evaluating model: {model_name}")
     print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
 
