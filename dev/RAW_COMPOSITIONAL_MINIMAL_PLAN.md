@@ -27,6 +27,9 @@ Keep the implementation centered on these upstream files:
 
 Add at most one small helper module for compositional metadata / sequence matching / surface reconstruction.
 
+Candidate helper module:
+- `nanochat/compositional.py`
+
 ## Runtime contract
 
 Tokenizer-time:
@@ -59,6 +62,33 @@ Eval / sampling:
 - Decoding sampled outputs requires a small surface reconstructor from `(base_id, modifiers)` back to text.
 - Keep baseline eval flow; only swap tokenization / decoding where needed.
 
+## Proposed API boundary
+
+Tokenizer:
+- Keep `encode()` and `decode()` baseline-compatible.
+- Add optional methods:
+  - `has_compositional_mode() -> bool`
+  - `encode_with_modifiers(text_or_texts, prepend=None, append=None, num_threads=8)`
+  - `decode_with_modifiers(token_ids, modifier_ids) -> str`
+- Keep `get_tokenizer()` behavior unchanged when no metadata artifact is present.
+
+Dataloader:
+- Extend the existing BOS best-fit loader with a flag such as `with_modifiers=False`.
+- If `with_modifiers=False`, preserve exact upstream output shape.
+- If `with_modifiers=True`, yield:
+  - `((x_ids, x_mods), (y_ids, y_mods), state_dict)`
+
+Model:
+- Prefer extending `GPT` directly over adding a second model class.
+- Extend `forward(...)` with optional:
+  - `modifier_ids=None`
+  - `target_modifier_ids=None`
+- Preserve the exact upstream base-model behavior when these are `None`.
+
+Training / eval scripts:
+- Prefer one optional CLI switch over separate entrypoints.
+- Baseline scripts should still run unmodified when the switch is off.
+
 ## Non-goals
 
 Do not bring over:
@@ -78,6 +108,7 @@ Target:
 - 5 to 6 edited upstream files
 - no new training entrypoint if avoidable
 - no new parallel data format required for normal training
+- no second training model class if avoidable
 
 If a design requires more than this, it should be treated as suspect and simplified.
 
