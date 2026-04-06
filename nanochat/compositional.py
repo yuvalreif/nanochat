@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from nanochat.compositional_rust import build_rust_backend
+
 
 def _as_int_list(values: Iterable[Any]) -> list[int]:
     return [int(v) for v in values]
@@ -90,6 +92,7 @@ class CompositionalSpec:
             default_modifier, num_groups=self.num_modifier_groups
         )
         self.direct_entries = direct_entries
+        self.sequence_entries = list(sequence_entries)
         self.inverse_surfaces = inverse_surfaces
         self._root = _TrieNode()
         self._max_sequence_len = 1
@@ -229,6 +232,27 @@ class CompositionalSpec:
             )
         return decode_token([int(token_id)])
 
+    def to_rust_config(self, tokenizer_json: Optional[str] = None) -> dict[str, Any]:
+        entries = []
+        for entry in self.sequence_entries:
+            entries.append(
+                {
+                    "token_ids": list(entry.token_ids),
+                    "base_ids": list(entry.base_ids),
+                    "modifier_rows": [list(row) for row in entry.modifier_rows],
+                }
+            )
+        payload = {
+            "version": 1,
+            "num_modifier_groups": int(self.num_modifier_groups),
+            "modifier_group_sizes": list(self.modifier_group_sizes),
+            "default_modifier": list(self.default_modifier),
+            "entries": entries,
+        }
+        if tokenizer_json is not None:
+            payload["tokenizer_json"] = tokenizer_json
+        return payload
+
 
 class CompositionalTokenizer:
     """
@@ -239,9 +263,10 @@ class CompositionalTokenizer:
     `decode_with_modifiers`.
     """
 
-    def __init__(self, base_tokenizer, spec: CompositionalSpec):
+    def __init__(self, base_tokenizer, spec: CompositionalSpec, *, tokenizer_dir: Optional[str] = None):
         self.base_tokenizer = base_tokenizer
         self.spec = spec
+        self.rust_backend = build_rust_backend(spec, tokenizer_dir=tokenizer_dir)
 
     def __getattr__(self, name: str):
         return getattr(self.base_tokenizer, name)
@@ -280,8 +305,11 @@ class CompositionalTokenizer:
         return out_ids, out_mods
 
     def _encode_one_with_modifiers(self, text: str, prepend=None, append=None):
-        raw_ids = self.base_tokenizer.encode(text)
-        token_ids, modifier_rows = self.spec.apply(list(raw_ids))
+        if self.rust_backend is not None:
+            token_ids, modifier_rows = self.rust_backend.process_text(text)
+        else:
+            raw_ids = self.base_tokenizer.encode(text)
+            token_ids, modifier_rows = self.spec.apply(list(raw_ids))
         return self._prepend_append_rows(
             token_ids,
             modifier_rows,
@@ -290,6 +318,12 @@ class CompositionalTokenizer:
         )
 
     def encode_with_modifiers(self, text, prepend=None, append=None, num_threads=8):
+        if self.rust_backend is not None and isinstance(text, list):
+            encoded = self.rust_backend.process_text_batch(text)
+            return [
+                self._prepend_append_rows(token_ids, modifier_rows, prepend=prepend, append=append)
+                for token_ids, modifier_rows in encoded
+            ]
         if isinstance(text, str):
             return self._encode_one_with_modifiers(text, prepend=prepend, append=append)
         if isinstance(text, list):

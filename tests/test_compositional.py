@@ -105,6 +105,51 @@ def test_compositional_tokenizer_batch_encode_and_decode():
     assert decoded == "AB"
 
 
+def test_compositional_tokenizer_uses_rust_backend_when_available(monkeypatch, tmp_path):
+    from nanochat import compositional as compositional_mod
+
+    tokenizer_dir = tmp_path / "tokenizer"
+    tokenizer_dir.mkdir()
+    (tokenizer_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    class MockBackend:
+        def process_text(self, text):
+            assert text == "ab"
+            return [12], [[2, 0]]
+
+        def process_text_batch(self, texts):
+            assert texts == ["ab", "ab"]
+            return [([12], [[2, 0]]), ([12], [[2, 0]])]
+
+    monkeypatch.setattr(compositional_mod, "build_rust_backend", lambda spec, tokenizer_dir=None: MockBackend())
+
+    tokenizer = compositional_mod.CompositionalTokenizer(
+        ToyTokenizer(),
+        compositional_mod.CompositionalSpec.from_dict(
+            {
+                "version": 1,
+                "num_modifier_groups": 2,
+                "default_modifier": [0, 0],
+                "entries": [
+                    {
+                        "token_ids": [1, 2],
+                        "base_ids": [12],
+                        "modifier": [2, 0],
+                        "surface": "AB",
+                    }
+                ],
+            }
+        ),
+        tokenizer_dir=str(tokenizer_dir),
+    )
+
+    single = tokenizer.encode_with_modifiers("ab", prepend=tokenizer.get_bos_token_id())
+    batch = tokenizer.encode_with_modifiers(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
+
+    assert single == ([99, 12], [[0, 0], [2, 0]])
+    assert batch == [([99, 12], [[0, 0], [2, 0]]), ([99, 12], [[0, 0], [2, 0]])]
+
+
 def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
     from nanochat import tokenizer as tokenizer_mod
 

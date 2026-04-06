@@ -621,7 +621,7 @@ def get_tokenizer():
     metadata_path = os.path.join(tokenizer_dir, "compositional.json")
     if os.path.exists(metadata_path):
         spec = CompositionalSpec.from_path(metadata_path)
-        return CompositionalTokenizer(tokenizer, spec)
+        return CompositionalTokenizer(tokenizer, spec, tokenizer_dir=tokenizer_dir)
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     return tokenizer
 
