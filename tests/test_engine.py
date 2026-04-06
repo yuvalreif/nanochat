@@ -81,6 +81,39 @@ class ByteTokenizer:
         byte_tokens = [t for t in tokens if t < 256]
         return bytes(byte_tokens).decode("utf-8", errors="replace")
 
+
+class CompositionalByteTokenizer(ByteTokenizer):
+    def get_default_modifier(self):
+        return [0]
+
+    def decode_with_modifiers(self, token_ids, modifier_ids):
+        chunks = []
+        for token_id, modifier_row in zip(token_ids, modifier_ids):
+            if token_id == 42 and list(modifier_row) == [2]:
+                chunks.append("X!")
+            else:
+                chunks.append(self.decode([token_id]))
+        return "".join(chunks)
+
+
+class MockCompositionalModel(MockModel):
+    def forward(self, ids, kv_cache=None, modifier_ids=None, return_hidden=False):
+        B, T = ids.shape
+        if kv_cache is not None:
+            kv_cache.advance(T)
+        logits = torch.zeros(B, T, self.vocab_size)
+        logits[:, :, 42] = 10.0
+        hidden = torch.ones(B, T, 4)
+        if return_hidden:
+            return logits, hidden
+        return logits
+
+    def get_modifier_logits(self, x, token_ids):
+        B, T = token_ids.shape
+        group_logits = torch.zeros(B, T, 3)
+        group_logits[:, :, 2] = 5.0
+        return [group_logits]
+
 def test_kv_cache_basic():
     """Test basic KVCache functionality for FA3."""
     batch_size = 2
@@ -265,3 +298,23 @@ def test_different_seeds_introduce_variation_when_temperature_nonzero():
 
     # Sanity check: sampling actually introduces variation
     assert len(outputs) > 1, "All seeds produced the same output which is statistically highly improbable."
+
+
+def test_compositional_generate_batch_returns_modifier_rows():
+    model = MockCompositionalModel(vocab_size=262)
+    tokenizer = CompositionalByteTokenizer()
+    engine = Engine(model, tokenizer)
+
+    prompt = ([261], [[0]])
+    (results, result_modifiers), masks = engine.generate_batch(
+        prompt,
+        num_samples=1,
+        max_tokens=1,
+        temperature=0.0,
+        seed=123,
+    )
+
+    assert results == [[261, 42]]
+    assert result_modifiers == [[[0], [2]]]
+    assert masks == [[0, 1]]
+    assert tokenizer.decode_with_modifiers(results[0][1:], result_modifiers[0][1:]) == "X!"

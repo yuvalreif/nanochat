@@ -129,10 +129,10 @@ modifier_group_sizes = tuple(tokenizer.get_modifier_group_sizes()) if compositio
 user_config["compositional_mode"] = compositional_mode
 user_config["modifier_group_sizes"] = list(modifier_group_sizes)
 if compositional_mode:
-    if args.core_metric_every > 0 or args.sample_every > 0:
+    if args.core_metric_every > 0:
         raise ValueError(
-            "Compositional raw training is not wired into CORE or sampling yet. "
-            "Re-run with --core-metric-every=-1 --sample-every=-1."
+            "Compositional raw training is not wired into CORE yet. "
+            "Re-run with --core-metric-every=-1."
         )
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
 
@@ -496,10 +496,17 @@ while True:
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
+            if compositional_mode:
+                tokens = tokenizer.encode_with_modifiers(prompt, prepend="<|bos|>")
+            else:
+                tokens = tokenizer(prompt, prepend="<|bos|>")
             with disable_fp8(orig_model):
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            print0(tokenizer.decode(sample[0]))
+            if compositional_mode:
+                sample_ids, sample_mods = sample
+                print0(tokenizer.decode_with_modifiers(sample_ids[0], sample_mods[0]))
+            else:
+                print0(tokenizer.decode(sample[0]))
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step

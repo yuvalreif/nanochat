@@ -216,10 +216,10 @@ def main():
         and hasattr(tokenizer, "has_compositional_mode")
         and tokenizer.has_compositional_mode()
     )
-    if compositional_mode and ({'core', 'sample'} & eval_modes):
+    if compositional_mode and ('core' in eval_modes):
         raise ValueError(
-            "Compositional base_eval currently supports bpb only. "
-            "Re-run with --eval=bpb."
+            "Compositional base_eval does not support CORE yet. "
+            "Re-run without core in --eval."
         )
 
     print0(f"Evaluating model: {model_name}")
@@ -249,18 +249,37 @@ def main():
             engine = Engine(model, tokenizer)
             print0("\nConditioned samples:")
             for prompt in prompts:
-                tokens = tokenizer(prompt, prepend="<|bos|>")
+                if compositional_mode:
+                    tokens = tokenizer.encode_with_modifiers(prompt, prepend="<|bos|>")
+                else:
+                    tokens = tokenizer(prompt, prepend="<|bos|>")
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-                sample_str = tokenizer.decode(sample[0])
+                if compositional_mode:
+                    sample_ids, sample_mods = sample
+                    sample_str = tokenizer.decode_with_modifiers(sample_ids[0], sample_mods[0])
+                else:
+                    sample_str = tokenizer.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
                 samples.append(sample_str)
 
             print0("\nUnconditioned samples:")
-            tokens = tokenizer("", prepend="<|bos|>")
+            if compositional_mode:
+                tokens = tokenizer.encode_with_modifiers("", prepend="<|bos|>")
+            else:
+                tokens = tokenizer("", prepend="<|bos|>")
             uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
-            for sample in uncond:
-                sample_str = tokenizer.decode(sample)
+            if compositional_mode:
+                uncond_ids, uncond_mods = uncond
+                iterator = zip(uncond_ids, uncond_mods)
+            else:
+                iterator = ((sample, None) for sample in uncond)
+            for sample_ids, sample_mods in iterator:
+                sample_str = (
+                    tokenizer.decode_with_modifiers(sample_ids, sample_mods)
+                    if compositional_mode
+                    else tokenizer.decode(sample_ids)
+                )
                 print0("-" * 80)
                 print0(sample_str)
                 unconditioned_samples.append(sample_str)

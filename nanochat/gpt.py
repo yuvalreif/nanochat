@@ -463,6 +463,25 @@ class GPT(nn.Module):
             out = group_embed if out is None else out + group_embed
         return out
 
+    def get_modifier_logits(self, x, token_ids):
+        if self.num_modifier_groups == 0:
+            return []
+        if x.dim() != 3:
+            raise ValueError(f"x must have shape [B, T, C], got {tuple(x.shape)}")
+        if token_ids.shape != x.shape[:2]:
+            raise ValueError(
+                "token_ids must match x shape in the first two dimensions: "
+                f"{tuple(token_ids.shape)} != {tuple(x.shape[:2])}"
+            )
+        x_flat = x.view(-1, x.size(-1))
+        token_flat = token_ids.view(-1).long()
+        outputs = []
+        for group_idx, _group_size in enumerate(self.modifier_group_sizes):
+            group_logits = self.modifier_heads[group_idx](x_flat)
+            group_logits = group_logits + self.modifier_base_biases[group_idx](token_flat).to(group_logits.dtype)
+            outputs.append(group_logits.view(*token_ids.shape, -1))
+        return outputs
+
     def _modifier_loss(self, x, targets, target_modifier_ids, loss_reduction):
         if self.num_modifier_groups == 0 or target_modifier_ids is None:
             return None
@@ -481,36 +500,27 @@ class GPT(nn.Module):
                 f"target_modifier_ids group mismatch: expected {self.num_modifier_groups}, got {target_modifier_ids.size(-1)}"
             )
 
-        x_flat = x.view(-1, x.size(-1))
-        target_flat = targets.view(-1)
-        valid_targets = target_flat >= 0
-        safe_targets = torch.where(valid_targets, target_flat, torch.zeros_like(target_flat))
+        valid_targets = targets >= 0
+        safe_targets = torch.where(valid_targets, targets, torch.zeros_like(targets))
+        modifier_logits = self.get_modifier_logits(x, safe_targets)
         modifier_loss = None
-        for group_idx, _group_size in enumerate(self.modifier_group_sizes):
-            group_logits = self.modifier_heads[group_idx](x_flat)
-            group_bias = self.modifier_base_biases[group_idx](safe_targets)
-            group_bias = torch.where(
-                valid_targets.unsqueeze(-1),
-                group_bias,
-                torch.zeros_like(group_bias),
-            )
-            group_logits = group_logits + group_bias.to(group_logits.dtype)
-            group_targets = target_modifier_ids[..., group_idx].reshape(-1).long()
+        for group_idx, group_logits in enumerate(modifier_logits):
+            group_targets = target_modifier_ids[..., group_idx].long()
             group_targets = torch.where(
                 valid_targets,
                 group_targets,
                 torch.full_like(group_targets, -1),
             )
             group_loss = F.cross_entropy(
-                group_logits,
-                group_targets,
+                group_logits.view(-1, group_logits.size(-1)),
+                group_targets.reshape(-1),
                 ignore_index=-1,
                 reduction=loss_reduction,
             )
             modifier_loss = group_loss if modifier_loss is None else modifier_loss + group_loss
         return modifier_loss / self.num_modifier_groups
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', modifier_ids=None, target_modifier_ids=None):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', modifier_ids=None, target_modifier_ids=None, return_hidden=False):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -580,6 +590,8 @@ class GPT(nn.Module):
             return loss
         else:
             # inference: just return the logits directly
+            if return_hidden:
+                return logits, x
             return logits
 
     @torch.inference_mode()
