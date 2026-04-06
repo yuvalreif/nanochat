@@ -129,10 +129,10 @@ modifier_group_sizes = tuple(tokenizer.get_modifier_group_sizes()) if compositio
 user_config["compositional_mode"] = compositional_mode
 user_config["modifier_group_sizes"] = list(modifier_group_sizes)
 if compositional_mode:
-    if args.eval_every > 0 or args.core_metric_every > 0 or args.sample_every > 0:
+    if args.core_metric_every > 0 or args.sample_every > 0:
         raise ValueError(
-            "Compositional raw training is not wired into val bpb / CORE / sampling yet. "
-            "Re-run with --eval-every=-1 --core-metric-every=-1 --sample-every=-1."
+            "Compositional raw training is not wired into CORE or sampling yet. "
+            "Re-run with --core-metric-every=-1 --sample-every=-1."
         )
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
 
@@ -452,7 +452,7 @@ while True:
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
         with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, tokenizer=tokenizer)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb

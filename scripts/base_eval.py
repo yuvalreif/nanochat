@@ -211,6 +211,16 @@ def main():
         token_bytes = get_token_bytes(device=device)
         model_name = f"base_model (step {meta['step']})"
         model_slug = f"base_model_{meta['step']:06d}"
+    compositional_mode = bool(
+        not is_hf_model
+        and hasattr(tokenizer, "has_compositional_mode")
+        and tokenizer.has_compositional_mode()
+    )
+    if compositional_mode and ({'core', 'sample'} & eval_modes):
+        raise ValueError(
+            "Compositional base_eval currently supports bpb only. "
+            "Re-run with --eval=bpb."
+        )
 
     print0(f"Evaluating model: {model_name}")
     print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
@@ -270,8 +280,15 @@ def main():
         steps = args.split_tokens // tokens_per_step
 
         for split_name in ["train", "val"]:
-            loader = tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, split_name, device=device)
-            bpb = evaluate_bpb(model, loader, steps, token_bytes)
+            loader = tokenizing_distributed_data_loader_bos_bestfit(
+                tokenizer,
+                args.device_batch_size,
+                sequence_len,
+                split_name,
+                device=device,
+                with_modifiers=compositional_mode,
+            )
+            bpb = evaluate_bpb(model, loader, steps, token_bytes, tokenizer=tokenizer)
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")
 

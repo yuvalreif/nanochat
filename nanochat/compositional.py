@@ -213,12 +213,21 @@ class CompositionalSpec:
             )
         chunks: list[str] = []
         for token_id, modifier_row in zip(token_ids, modifier_ids):
-            key = (int(token_id), tuple(int(v) for v in modifier_row))
-            chunk = self.inverse_surfaces.get(key)
-            if chunk is None:
-                chunk = decode_token([int(token_id)])
-            chunks.append(chunk)
+            chunks.append(self.surface_for_token(token_id, modifier_row, decode_token))
         return "".join(chunks)
+
+    def surface_for_token(self, token_id: int, modifier_row: Iterable[Any], decode_token) -> str:
+        normalized_row = tuple(int(v) for v in modifier_row)
+        key = (int(token_id), normalized_row)
+        chunk = self.inverse_surfaces.get(key)
+        if chunk is not None:
+            return chunk
+        if normalized_row != self.default_modifier:
+            raise ValueError(
+                "Missing inverse surface for modified token: "
+                f"token_id={int(token_id)}, modifier={list(normalized_row)}"
+            )
+        return decode_token([int(token_id)])
 
 
 class CompositionalTokenizer:
@@ -245,6 +254,9 @@ class CompositionalTokenizer:
 
     def get_modifier_group_sizes(self) -> list[int]:
         return list(self.spec.modifier_group_sizes)
+
+    def get_default_modifier(self) -> list[int]:
+        return list(self.spec.default_modifier)
 
     def _prepend_append_rows(
         self,
@@ -286,6 +298,9 @@ class CompositionalTokenizer:
                 for t in text
             ]
         raise ValueError(f"Invalid input type: {type(text)}")
+
+    def decode_token_with_modifiers(self, token_id: int, modifier_row: Iterable[Any]) -> str:
+        return self.spec.surface_for_token(token_id, modifier_row, self.base_tokenizer.decode)
 
     def decode_with_modifiers(self, token_ids: list[int], modifier_ids: list[list[int]]) -> str:
         return self.spec.reconstruct_surface(token_ids, modifier_ids, self.base_tokenizer.decode)

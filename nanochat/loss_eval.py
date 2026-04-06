@@ -5,8 +5,40 @@ import math
 import torch
 import torch.distributed as dist
 
+
+def _unpack_eval_batch(batch):
+    x, y = batch
+    if isinstance(x, tuple) and isinstance(y, tuple):
+        x_ids, x_mods = x
+        y_ids, y_mods = y
+        return x_ids, y_ids, x_mods, y_mods
+    return x, y, None, None
+
+
+def _compositional_target_bytes(y, y_mods, token_bytes, tokenizer):
+    if tokenizer is None or not hasattr(tokenizer, "decode_token_with_modifiers"):
+        raise ValueError(
+            "Compositional BPB evaluation requires a tokenizer with "
+            "decode_token_with_modifiers()."
+        )
+    default_modifier = tuple(int(v) for v in tokenizer.get_default_modifier())
+    y_flat = y.view(-1)
+    mods_flat = y_mods.view(-1, y_mods.size(-1))
+    num_bytes = torch.zeros_like(y_flat, dtype=token_bytes.dtype)
+    valid = y_flat >= 0
+    for idx in valid.nonzero(as_tuple=False).view(-1).tolist():
+        token_id = int(y_flat[idx].item())
+        modifier_row = tuple(int(v) for v in mods_flat[idx].tolist())
+        if modifier_row == default_modifier:
+            num_bytes[idx] = token_bytes[token_id]
+            continue
+        chunk = tokenizer.decode_token_with_modifiers(token_id, modifier_row)
+        num_bytes[idx] = len(chunk.encode("utf-8"))
+    return num_bytes
+
+
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(model, batches, steps, token_bytes, tokenizer=None):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -29,11 +61,24 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
     batch_iter = iter(batches)
     for _ in range(steps):
-        x, y = next(batch_iter)
-        loss2d = model(x, y, loss_reduction='none') # (B, T)
+        x, y, x_mods, y_mods = _unpack_eval_batch(next(batch_iter))
+        if x_mods is None:
+            loss2d = model(x, y, loss_reduction='none') # (B, T) or flattened
+        else:
+            loss2d = model(
+                x,
+                y,
+                loss_reduction='none',
+                modifier_ids=x_mods,
+                target_modifier_ids=y_mods,
+            )
         loss2d = loss2d.view(-1) # flatten
         y = y.view(-1) # flatten
-        if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
+        if y_mods is not None:
+            num_bytes2d = _compositional_target_bytes(y.view_as(loss2d), y_mods, token_bytes, tokenizer)
+            total_nats += (loss2d * (num_bytes2d > 0)).sum()
+            total_bytes += num_bytes2d.sum()
+        elif (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
             # slightly more complex code path if some target tokens are ignore_index (e.g. -1)
             # any target token < 0 is to be ignored: do NOT index token_bytes with negatives
             valid = y >= 0
