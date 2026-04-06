@@ -70,15 +70,22 @@ class CompositionalSpec:
     def __init__(
         self,
         *,
+        modifier_group_sizes: Iterable[Any],
         num_modifier_groups: int,
         default_modifier: Iterable[Any],
         direct_entries: dict[int, _SequenceEntry],
         sequence_entries: list[_SequenceEntry],
         inverse_surfaces: dict[tuple[int, tuple[int, ...]], str],
     ) -> None:
+        self.modifier_group_sizes = tuple(int(v) for v in modifier_group_sizes)
         self.num_modifier_groups = int(num_modifier_groups)
         if self.num_modifier_groups <= 0:
             raise ValueError("num_modifier_groups must be > 0")
+        if len(self.modifier_group_sizes) != self.num_modifier_groups:
+            raise ValueError(
+                "modifier_group_sizes length mismatch: "
+                f"{len(self.modifier_group_sizes)} != {self.num_modifier_groups}"
+            )
         self.default_modifier = _normalize_modifier_row(
             default_modifier, num_groups=self.num_modifier_groups
         )
@@ -95,7 +102,13 @@ class CompositionalSpec:
         if version != 1:
             raise ValueError(f"Unsupported compositional metadata version: {version}")
 
-        num_groups = int(payload["num_modifier_groups"])
+        raw_group_sizes = payload.get("modifier_group_sizes")
+        if raw_group_sizes is None:
+            num_groups = int(payload["num_modifier_groups"])
+            raw_group_sizes = [2] * num_groups
+        else:
+            raw_group_sizes = _as_int_list(raw_group_sizes)
+            num_groups = len(raw_group_sizes)
         default_modifier = payload.get("default_modifier", [0] * num_groups)
 
         direct_entries: dict[int, _SequenceEntry] = {}
@@ -134,6 +147,7 @@ class CompositionalSpec:
             inverse_surfaces[(base_id, modifier_row)] = str(raw_entry["surface"])
 
         return cls(
+            modifier_group_sizes=raw_group_sizes,
             num_modifier_groups=num_groups,
             default_modifier=default_modifier,
             direct_entries=direct_entries,
@@ -229,6 +243,9 @@ class CompositionalTokenizer:
     def get_num_modifier_groups(self) -> int:
         return self.spec.num_modifier_groups
 
+    def get_modifier_group_sizes(self) -> list[int]:
+        return list(self.spec.modifier_group_sizes)
+
     def _prepend_append_rows(
         self,
         token_ids: list[int],
@@ -272,4 +289,3 @@ class CompositionalTokenizer:
 
     def decode_with_modifiers(self, token_ids: list[int], modifier_ids: list[list[int]]) -> str:
         return self.spec.reconstruct_surface(token_ids, modifier_ids, self.base_tokenizer.decode)
-

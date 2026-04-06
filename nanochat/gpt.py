@@ -37,6 +37,8 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    modifier_group_sizes: tuple[int, ...] = ()
+    modifier_loss_weight: float = 1.0
 
 
 def norm(x):
@@ -173,6 +175,17 @@ class GPT(nn.Module):
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
         self.lm_head = Linear(config.n_embd, padded_vocab_size, bias=False)
+        self.modifier_group_sizes = tuple(int(v) for v in (config.modifier_group_sizes or ()))
+        self.num_modifier_groups = len(self.modifier_group_sizes)
+        self.modifier_embeds = nn.ModuleList(
+            [nn.Embedding(group_size, config.n_embd) for group_size in self.modifier_group_sizes]
+        )
+        self.modifier_heads = nn.ModuleList(
+            [Linear(config.n_embd, group_size, bias=False) for group_size in self.modifier_group_sizes]
+        )
+        self.modifier_base_biases = nn.ModuleList(
+            [nn.Embedding(padded_vocab_size, group_size) for group_size in self.modifier_group_sizes]
+        )
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
         # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
@@ -217,6 +230,12 @@ class GPT(nn.Module):
         # Embedding and unembedding
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+        for embed in self.modifier_embeds:
+            torch.nn.init.normal_(embed.weight, mean=0.0, std=0.8)
+        for head in self.modifier_heads:
+            torch.nn.init.normal_(head.weight, mean=0.0, std=0.001)
+        for bias_embed in self.modifier_base_biases:
+            torch.nn.init.zeros_(bias_embed.weight)
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
         n_embd = self.config.n_embd
@@ -257,6 +276,8 @@ class GPT(nn.Module):
         # because GradScaler cannot unscale fp16 gradients.
         if COMPUTE_DTYPE != torch.float16:
             self.transformer.wte.to(dtype=COMPUTE_DTYPE)
+            for embed in self.modifier_embeds:
+                embed.to(dtype=COMPUTE_DTYPE)
             for ve in self.value_embeds.values():
                 ve.to(dtype=COMPUTE_DTYPE)
 
@@ -323,8 +344,10 @@ class GPT(nn.Module):
         """
         nparams = sum(p.numel() for p in self.parameters())
         # Exclude non-matmul params: embeddings and per-layer scalars
+        modifier_embeds_numel = sum(embed.weight.numel() for embed in self.modifier_embeds)
+        modifier_base_bias_numel = sum(embed.weight.numel() for embed in self.modifier_base_biases)
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
-        nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
+        nparams_exclude = (self.transformer.wte.weight.numel() + modifier_embeds_numel + modifier_base_bias_numel + value_embeds_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel() +
                           self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel())
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
@@ -351,14 +374,20 @@ class GPT(nn.Module):
         """
         # Count each group separately (mirrors the grouping in setup_optimizers)
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        modifier_embeds = sum(p.numel() for p in self.modifier_embeds.parameters())
+        modifier_heads = sum(p.numel() for p in self.modifier_heads.parameters())
+        modifier_base_biases = sum(p.numel() for p in self.modifier_base_biases.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        total = wte + modifier_embeds + modifier_heads + modifier_base_biases + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
         return {
             'wte': wte,
+            'modifier_embeds': modifier_embeds,
+            'modifier_heads': modifier_heads,
+            'modifier_base_biases': modifier_base_biases,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
             'transformer_matrices': transformer_matrices,
@@ -373,8 +402,8 @@ class GPT(nn.Module):
         # Separate out all parameters into groups
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
-        embedding_params = list(self.transformer.wte.parameters())
-        lm_head_params = list(self.lm_head.parameters())
+        embedding_params = list(self.transformer.wte.parameters()) + list(self.modifier_embeds.parameters()) + list(self.modifier_base_biases.parameters())
+        lm_head_params = list(self.lm_head.parameters()) + list(self.modifier_heads.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
@@ -408,7 +437,80 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def _modifier_embed_sum(self, modifier_ids):
+        if self.num_modifier_groups == 0:
+            raise ValueError("modifier_ids were provided but the model has no modifier groups configured.")
+        if modifier_ids is None:
+            return None
+        if modifier_ids.dim() != 3:
+            raise ValueError(
+                f"modifier_ids must have shape [B, T, G], got {tuple(modifier_ids.shape)}"
+            )
+        if modifier_ids.size(-1) != self.num_modifier_groups:
+            raise ValueError(
+                f"modifier_ids group mismatch: expected {self.num_modifier_groups}, got {modifier_ids.size(-1)}"
+            )
+        out = None
+        for group_idx, group_size in enumerate(self.modifier_group_sizes):
+            group_ids = modifier_ids[..., group_idx].long()
+            if (group_ids < 0).any() or (group_ids >= group_size).any():
+                bad_ids = group_ids[(group_ids < 0) | (group_ids >= group_size)][:8].detach().cpu().tolist()
+                raise ValueError(
+                    f"modifier_ids out of range for group {group_idx}: "
+                    f"group_size={group_size}, sample_bad_ids={bad_ids}"
+                )
+            group_embed = self.modifier_embeds[group_idx](group_ids)
+            out = group_embed if out is None else out + group_embed
+        return out
+
+    def _modifier_loss(self, x, targets, target_modifier_ids, loss_reduction):
+        if self.num_modifier_groups == 0 or target_modifier_ids is None:
+            return None
+        if target_modifier_ids.dim() != 3:
+            raise ValueError(
+                "target_modifier_ids must have shape [B, T, G], "
+                f"got {tuple(target_modifier_ids.shape)}"
+            )
+        if target_modifier_ids.shape[:2] != targets.shape:
+            raise ValueError(
+                "target_modifier_ids must match targets shape in the first two dimensions: "
+                f"{tuple(target_modifier_ids.shape[:2])} != {tuple(targets.shape)}"
+            )
+        if target_modifier_ids.size(-1) != self.num_modifier_groups:
+            raise ValueError(
+                f"target_modifier_ids group mismatch: expected {self.num_modifier_groups}, got {target_modifier_ids.size(-1)}"
+            )
+
+        x_flat = x.view(-1, x.size(-1))
+        target_flat = targets.view(-1)
+        valid_targets = target_flat >= 0
+        safe_targets = torch.where(valid_targets, target_flat, torch.zeros_like(target_flat))
+        modifier_loss = None
+        for group_idx, _group_size in enumerate(self.modifier_group_sizes):
+            group_logits = self.modifier_heads[group_idx](x_flat)
+            group_bias = self.modifier_base_biases[group_idx](safe_targets)
+            group_bias = torch.where(
+                valid_targets.unsqueeze(-1),
+                group_bias,
+                torch.zeros_like(group_bias),
+            )
+            group_logits = group_logits + group_bias.to(group_logits.dtype)
+            group_targets = target_modifier_ids[..., group_idx].reshape(-1).long()
+            group_targets = torch.where(
+                valid_targets,
+                group_targets,
+                torch.full_like(group_targets, -1),
+            )
+            group_loss = F.cross_entropy(
+                group_logits,
+                group_targets,
+                ignore_index=-1,
+                reduction=loss_reduction,
+            )
+            modifier_loss = group_loss if modifier_loss is None else modifier_loss + group_loss
+        return modifier_loss / self.num_modifier_groups
+
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', modifier_ids=None, target_modifier_ids=None):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -421,6 +523,8 @@ class GPT(nn.Module):
 
         # Embed the tokens
         x = self.transformer.wte(idx) # embed current token
+        if modifier_ids is not None:
+            x = x + self._modifier_embed_sum(modifier_ids).to(dtype=x.dtype)
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
 
@@ -470,6 +574,9 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            modifier_loss = self._modifier_loss(x, targets, target_modifier_ids, loss_reduction)
+            if modifier_loss is not None:
+                loss = loss + float(self.config.modifier_loss_weight) * modifier_loss
             return loss
         else:
             # inference: just return the logits directly
