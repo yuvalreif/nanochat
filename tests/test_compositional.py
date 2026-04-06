@@ -152,9 +152,11 @@ def test_compositional_tokenizer_uses_rust_backend_when_available(monkeypatch, t
 
 def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
     from nanochat import tokenizer as tokenizer_mod
+    from nanochat import compositional as compositional_mod
 
     tokenizer_dir = tmp_path / "tokenizer"
     tokenizer_dir.mkdir()
+    (tokenizer_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
     (tokenizer_dir / "compositional.json").write_text(
         json.dumps(
             {
@@ -178,9 +180,26 @@ def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
             return str(tmp_path)
 
     monkeypatch.setattr("nanochat.common.get_base_dir", DummyCommon.get_base_dir)
+    monkeypatch.setattr(compositional_mod, "build_rust_backend", lambda spec, tokenizer_dir=None: object())
     tok = tokenizer_mod.get_tokenizer()
     assert isinstance(tok, CompositionalTokenizer)
     assert tok.get_num_modifier_groups() == 1
+
+
+def test_compositional_tokenizer_requires_rust_backend_when_loading_from_dir(tmp_path):
+    with pytest.raises(RuntimeError, match="requires the Rust backend"):
+        CompositionalTokenizer(
+            ToyTokenizer(),
+            CompositionalSpec.from_dict(
+                {
+                    "version": 1,
+                    "num_modifier_groups": 1,
+                    "default_modifier": [0],
+                    "entries": [],
+                }
+            ),
+            tokenizer_dir=str(tmp_path),
+        )
 
 
 def test_dataloader_with_modifiers_yields_modifier_batches(monkeypatch):

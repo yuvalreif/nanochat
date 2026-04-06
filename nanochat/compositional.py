@@ -267,6 +267,11 @@ class CompositionalTokenizer:
         self.base_tokenizer = base_tokenizer
         self.spec = spec
         self.rust_backend = build_rust_backend(spec, tokenizer_dir=tokenizer_dir)
+        if tokenizer_dir is not None and self.rust_backend is None:
+            raise RuntimeError(
+                "Compositional tokenizer requires the Rust backend at runtime. "
+                "Build/install the nanochat compositional Rust extension first."
+            )
 
     def __getattr__(self, name: str):
         return getattr(self.base_tokenizer, name)
