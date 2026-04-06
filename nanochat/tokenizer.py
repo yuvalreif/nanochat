@@ -10,6 +10,8 @@ import os
 import copy
 from functools import lru_cache
 
+from nanochat.compositional import CompositionalSpec, CompositionalTokenizer
+
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
@@ -391,8 +393,13 @@ def get_tokenizer():
     from nanochat.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    tokenizer = RustBPETokenizer.from_directory(tokenizer_dir)
+    metadata_path = os.path.join(tokenizer_dir, "compositional.json")
+    if os.path.exists(metadata_path):
+        spec = CompositionalSpec.from_path(metadata_path)
+        return CompositionalTokenizer(tokenizer, spec)
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
-    return RustBPETokenizer.from_directory(tokenizer_dir)
+    return tokenizer
 
 def get_token_bytes(device="cpu"):
     import torch
