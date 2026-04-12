@@ -81,6 +81,8 @@ class CompositionalSpec:
         modifier_group_sizes: Iterable[Any],
         num_modifier_groups: int,
         default_modifier: Iterable[Any],
+        group_names: Iterable[str],
+        group_value_names: dict[str, list[str]],
         direct_entries: dict[int, _SequenceEntry],
         sequence_entries: list[_SequenceEntry],
         inverse_surfaces: dict[tuple[int, tuple[int, ...]], str],
@@ -97,6 +99,17 @@ class CompositionalSpec:
         self.default_modifier = _normalize_modifier_row(
             default_modifier, num_groups=self.num_modifier_groups
         )
+        self.group_names = tuple(str(name) for name in group_names)
+        if len(self.group_names) != self.num_modifier_groups:
+            raise ValueError(
+                "group_names length mismatch: "
+                f"{len(self.group_names)} != {self.num_modifier_groups}"
+            )
+        self.group_to_idx = {name: idx for idx, name in enumerate(self.group_names)}
+        self.group_value_names = {
+            str(group): [str(v) for v in values]
+            for group, values in (group_value_names or {}).items()
+        }
         self.direct_entries = direct_entries
         self.sequence_entries = list(sequence_entries)
         self.inverse_surfaces = inverse_surfaces
@@ -122,6 +135,11 @@ class CompositionalSpec:
             raw_group_sizes = _as_int_list(raw_group_sizes)
             num_groups = len(raw_group_sizes)
         default_modifier = payload.get("default_modifier", [0] * num_groups)
+        group_names = payload.get("group_names") or [f"group_{idx}" for idx in range(num_groups)]
+        group_value_names = {
+            str(group): [str(v) for v in values]
+            for group, values in (payload.get("group_value_names") or {}).items()
+        }
 
         direct_entries: dict[int, _SequenceEntry] = {}
         sequence_entries: list[_SequenceEntry] = []
@@ -159,6 +177,8 @@ class CompositionalSpec:
             modifier_group_sizes=raw_group_sizes,
             num_modifier_groups=num_groups,
             default_modifier=default_modifier,
+            group_names=group_names,
+            group_value_names=group_value_names,
             direct_entries=direct_entries,
             sequence_entries=sequence_entries,
             inverse_surfaces=inverse_surfaces,
@@ -247,6 +267,111 @@ class CompositionalSpec:
             idx += len(entry.token_ids)
         return out_ids, out_mods
 
+    def _combine_modifier_rows(
+        self,
+        modifier_rows: tuple[tuple[int, ...], ...] | list[list[int]],
+    ) -> tuple[int, ...]:
+        combined = list(self.default_modifier)
+        for row in modifier_rows:
+            normalized = _normalize_modifier_row(row, num_groups=self.num_modifier_groups)
+            for group_idx, value in enumerate(normalized):
+                if int(value) != int(self.default_modifier[group_idx]):
+                    combined[group_idx] = int(value)
+        return tuple(combined)
+
+    def _value_name(self, group_name: str, value: int) -> Optional[str]:
+        names = self.group_value_names.get(group_name, [])
+        if 0 <= int(value) < len(names):
+            return names[int(value)]
+        return None
+
+    def _capitalize_first_alpha(self, text: str) -> str:
+        chars = list(text)
+        for idx, ch in enumerate(chars):
+            if ch.isalpha():
+                chars[idx] = ch.upper()
+                break
+        return "".join(chars)
+
+    def _lowercase_first_alpha(self, text: str) -> str:
+        chars = list(text)
+        for idx, ch in enumerate(chars):
+            if ch.isalpha():
+                chars[idx] = ch.lower()
+                break
+        return "".join(chars)
+
+    def _space_setting(self, modifiers: tuple[int, ...], group_name: str) -> bool:
+        group_idx = self.group_to_idx.get(group_name)
+        if group_idx is None:
+            return False
+        value = int(modifiers[group_idx])
+        if value == int(self.default_modifier[group_idx]):
+            return False
+        value_name = (self._value_name(group_name, value) or "").lower()
+        if value_name.startswith(("with_", "add_")):
+            return True
+        if value_name.startswith(("remove_", "no_", "na_", "none")):
+            return False
+        return value == 1
+
+    def _literal_from_group(self, modifiers: tuple[int, ...], group_name: str, prefixes: tuple[str, ...]) -> Optional[str]:
+        group_idx = self.group_to_idx.get(group_name)
+        if group_idx is None:
+            return None
+        value = int(modifiers[group_idx])
+        if value == int(self.default_modifier[group_idx]):
+            return None
+        value_name = self._value_name(group_name, value)
+        if not value_name:
+            return None
+        for prefix in prefixes:
+            if value_name.startswith(prefix):
+                return value_name[len(prefix):]
+        return None
+
+    def _apply_base_capitalization(self, surface: str, modifiers: tuple[int, ...]) -> str:
+        group_idx = self.group_to_idx.get("base_capitalization")
+        if group_idx is None:
+            return surface
+        value = int(modifiers[group_idx])
+        if value == int(self.default_modifier[group_idx]):
+            return surface
+        value_name = (self._value_name("base_capitalization", value) or "").lower()
+        if value_name.startswith(("add_", "with_")) or value == 1:
+            return self._capitalize_first_alpha(surface)
+        if value_name.startswith(("remove_", "lower_")):
+            return self._lowercase_first_alpha(surface)
+        return surface
+
+    def _synthesize_surface(self, lexical_surface: str, modifiers: tuple[int, ...]) -> str:
+        surface = lexical_surface.strip()
+        surface = self._apply_base_capitalization(surface, modifiers)
+
+        prefix_punct = self._literal_from_group(modifiers, "prefix_punctuation", ("punct_prefix_",))
+        preposition = self._literal_from_group(modifiers, "prepositions", ("prep_",))
+        determiner = self._literal_from_group(modifiers, "determiners", ("det_", "article_"))
+        if determiner is None:
+            determiner = self._literal_from_group(modifiers, "article_det", ("det_", "article_"))
+        if determiner is None:
+            determiner = self._literal_from_group(modifiers, "articles", ("article_", "det_"))
+        suffix_punct = self._literal_from_group(modifiers, "suffix_punctuation", ("punct_suffix_",))
+
+        if preposition and self._space_setting(modifiers, "prep_capitalization"):
+            preposition = self._capitalize_first_alpha(preposition)
+        if determiner and self._space_setting(modifiers, "article_capitalization"):
+            determiner = self._capitalize_first_alpha(determiner)
+
+        pieces = [piece for piece in (preposition, determiner, surface) if piece]
+        expr = " ".join(pieces)
+        if prefix_punct:
+            expr = f"{prefix_punct}{expr}"
+        if suffix_punct:
+            expr = f"{expr}{suffix_punct}"
+        if self._space_setting(modifiers, "space_prefix") and expr and not expr[:1].isspace():
+            expr = " " + expr
+        return expr
+
     def reconstruct_surface(self, token_ids: list[int], modifier_ids: list[list[int]], decode_token) -> str:
         if len(token_ids) != len(modifier_ids):
             raise ValueError(
@@ -257,10 +382,8 @@ class CompositionalSpec:
         while idx < len(token_ids):
             entry = self._longest_reverse_match(token_ids, modifier_ids, idx)
             if entry is not None:
-                if entry.surface is not None:
-                    chunks.append(entry.surface)
-                else:
-                    chunks.append(decode_token(list(entry.token_ids)))
+                lexical_surface = entry.surface if entry.surface is not None else decode_token(list(entry.token_ids))
+                chunks.append(self._synthesize_surface(lexical_surface, self._combine_modifier_rows(entry.modifier_rows)))
                 idx += len(entry.base_ids)
                 continue
             chunks.append(self.surface_for_token(token_ids[idx], modifier_ids[idx], decode_token))
@@ -270,15 +393,10 @@ class CompositionalSpec:
     def surface_for_token(self, token_id: int, modifier_row: Iterable[Any], decode_token) -> str:
         normalized_row = tuple(int(v) for v in modifier_row)
         key = (int(token_id), normalized_row)
-        chunk = self.inverse_surfaces.get(key)
-        if chunk is not None:
-            return chunk
-        if normalized_row != self.default_modifier:
-            raise ValueError(
-                "Missing inverse surface for modified token: "
-                f"token_id={int(token_id)}, modifier={list(normalized_row)}"
-            )
-        return decode_token([int(token_id)])
+        lexical_surface = self.inverse_surfaces.get(key)
+        if lexical_surface is None:
+            lexical_surface = decode_token([int(token_id)])
+        return self._synthesize_surface(lexical_surface, normalized_row)
 
     def to_rust_config(self, tokenizer_json: Optional[str] = None) -> dict[str, Any]:
         entries = []

@@ -112,6 +112,11 @@ def test_compositional_decode_uses_reverse_span_match_for_multi_token_entries():
             {
                 "version": 1,
                 "num_modifier_groups": 2,
+                "group_names": ["space_prefix", "base_capitalization"],
+                "group_value_names": {
+                    "space_prefix": ["no_space_prefix", "with_space_prefix"],
+                    "base_capitalization": ["no_capitalization", "add_capitalization"],
+                },
                 "default_modifier": [0, 0],
                 "entries": [
                     {
@@ -126,7 +131,36 @@ def test_compositional_decode_uses_reverse_span_match_for_multi_token_entries():
     )
 
     decoded = tokenizer.decode_with_modifiers([10, 11], [[1, 0], [0, 2]])
-    assert decoded == "ab"
+    assert decoded == " ab"
+
+
+def test_compositional_decode_synthesizes_space_and_case_from_modifier_names():
+    tokenizer = CompositionalTokenizer(
+        ToyTokenizer(),
+        CompositionalSpec.from_dict(
+            {
+                "version": 1,
+                "num_modifier_groups": 2,
+                "group_names": ["space_prefix", "base_capitalization"],
+                "group_value_names": {
+                    "space_prefix": ["no_space_prefix", "with_space_prefix"],
+                    "base_capitalization": ["no_capitalization", "add_capitalization"],
+                },
+                "default_modifier": [0, 0],
+                "entries": [
+                    {
+                        "token_ids": [1, 2],
+                        "base_ids": [12],
+                        "modifier_rows": [[1, 1]],
+                        "surface": "ab",
+                    }
+                ],
+            }
+        ),
+    )
+
+    decoded = tokenizer.decode_with_modifiers([12], [[1, 1]])
+    assert decoded == " Ab"
 
 
 def test_compositional_tokenizer_uses_rust_backend_when_available(monkeypatch, tmp_path):
