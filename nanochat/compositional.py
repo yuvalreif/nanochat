@@ -68,6 +68,12 @@ class _TrieNode:
         self.entry: Optional[_SequenceEntry] = None
 
 
+class _ReverseTrieNode:
+    def __init__(self) -> None:
+        self.children: dict[tuple[int, tuple[int, ...]], _ReverseTrieNode] = {}
+        self.entry: Optional[_SequenceEntry] = None
+
+
 class CompositionalSpec:
     def __init__(
         self,
@@ -96,8 +102,11 @@ class CompositionalSpec:
         self.inverse_surfaces = inverse_surfaces
         self._root = _TrieNode()
         self._max_sequence_len = 1
+        self._reverse_root = _ReverseTrieNode()
+        self._max_reverse_sequence_len = 1
         for entry in sequence_entries:
             self._insert(entry)
+            self._insert_reverse(entry)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CompositionalSpec":
@@ -138,9 +147,6 @@ class CompositionalSpec:
             if len(token_ids) == 1:
                 direct_entries[token_ids[0]] = entry
             sequence_entries.append(entry)
-            if entry.surface is not None and len(entry.base_ids) == len(entry.modifier_rows):
-                for base_id, modifier_row in zip(entry.base_ids, entry.modifier_rows):
-                    inverse_surfaces.setdefault((base_id, modifier_row), entry.surface)
 
         for raw_entry in payload.get("inverse_entries", []):
             base_id = int(raw_entry["base_id"])
@@ -173,6 +179,16 @@ class CompositionalSpec:
         node.entry = entry
         self._max_sequence_len = max(self._max_sequence_len, len(entry.token_ids))
 
+    def _insert_reverse(self, entry: _SequenceEntry) -> None:
+        node = self._reverse_root
+        for base_id, modifier_row in zip(entry.base_ids, entry.modifier_rows):
+            key = (int(base_id), tuple(int(v) for v in modifier_row))
+            if key not in node.children:
+                node.children[key] = _ReverseTrieNode()
+            node = node.children[key]
+        node.entry = entry
+        self._max_reverse_sequence_len = max(self._max_reverse_sequence_len, len(entry.base_ids))
+
     def _longest_match(self, token_ids: list[int], start_idx: int) -> Optional[_SequenceEntry]:
         node = self._root
         best_entry = None
@@ -180,6 +196,28 @@ class CompositionalSpec:
         for pos in range(start_idx, stop):
             token_id = int(token_ids[pos])
             child = node.children.get(token_id)
+            if child is None:
+                break
+            node = child
+            if node.entry is not None:
+                best_entry = node.entry
+        return best_entry
+
+    def _longest_reverse_match(
+        self,
+        token_ids: list[int],
+        modifier_ids: list[list[int]],
+        start_idx: int,
+    ) -> Optional[_SequenceEntry]:
+        node = self._reverse_root
+        best_entry = None
+        stop = min(start_idx + self._max_reverse_sequence_len, len(token_ids))
+        for pos in range(start_idx, stop):
+            key = (
+                int(token_ids[pos]),
+                _normalize_modifier_row(modifier_ids[pos], num_groups=self.num_modifier_groups),
+            )
+            child = node.children.get(key)
             if child is None:
                 break
             node = child
@@ -215,8 +253,18 @@ class CompositionalSpec:
                 f"token_ids and modifier_ids length mismatch: {len(token_ids)} != {len(modifier_ids)}"
             )
         chunks: list[str] = []
-        for token_id, modifier_row in zip(token_ids, modifier_ids):
-            chunks.append(self.surface_for_token(token_id, modifier_row, decode_token))
+        idx = 0
+        while idx < len(token_ids):
+            entry = self._longest_reverse_match(token_ids, modifier_ids, idx)
+            if entry is not None:
+                if entry.surface is not None:
+                    chunks.append(entry.surface)
+                else:
+                    chunks.append(decode_token(list(entry.token_ids)))
+                idx += len(entry.base_ids)
+                continue
+            chunks.append(self.surface_for_token(token_ids[idx], modifier_ids[idx], decode_token))
+            idx += 1
         return "".join(chunks)
 
     def surface_for_token(self, token_id: int, modifier_row: Iterable[Any], decode_token) -> str:

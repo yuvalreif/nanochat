@@ -105,6 +105,30 @@ def test_compositional_tokenizer_batch_encode_and_decode():
     assert decoded == "AB"
 
 
+def test_compositional_decode_uses_reverse_span_match_for_multi_token_entries():
+    tokenizer = CompositionalTokenizer(
+        ToyTokenizer(),
+        CompositionalSpec.from_dict(
+            {
+                "version": 1,
+                "num_modifier_groups": 2,
+                "default_modifier": [0, 0],
+                "entries": [
+                    {
+                        "token_ids": [1, 2],
+                        "base_ids": [10, 11],
+                        "modifier_rows": [[1, 0], [0, 2]],
+                        "surface": "ab",
+                    }
+                ],
+            }
+        ),
+    )
+
+    decoded = tokenizer.decode_with_modifiers([10, 11], [[1, 0], [0, 2]])
+    assert decoded == "ab"
+
+
 def test_compositional_tokenizer_uses_rust_backend_when_available(monkeypatch, tmp_path):
     from nanochat import compositional as compositional_mod
 
