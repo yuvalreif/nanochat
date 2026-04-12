@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyList;
 use serde::Deserialize;
 use std::collections::HashMap;
 use tokenizers::Tokenizer;
@@ -116,15 +116,8 @@ impl CompositionalProcessor {
         Ok(encoding.get_ids().iter().map(|v| *v as u32).collect())
     }
 
-    fn build_result_dict<'py>(&self, py: Python<'py>, output_ids: Vec<u32>, modifier_rows: Vec<Vec<u16>>) -> PyResult<Bound<'py, PyDict>> {
-        let out = PyDict::new_bound(py);
-        out.set_item("output_ids", output_ids)?;
-        let rows = PyList::empty_bound(py);
-        for row in modifier_rows {
-            rows.append(row)?;
-        }
-        out.set_item("modifier_rows", rows)?;
-        Ok(out)
+    fn build_result_object(&self, py: Python<'_>, output_ids: Vec<u32>, modifier_rows: Vec<Vec<u16>>) -> PyObject {
+        (output_ids, modifier_rows).into_py(py)
     }
 }
 
@@ -172,14 +165,14 @@ impl CompositionalProcessor {
 
     fn process_ids(&self, raw_ids: Vec<u32>, py: Python<'_>) -> PyResult<PyObject> {
         let (output_ids, modifier_rows) = self.process_ids_impl(&raw_ids);
-        Ok(self.build_result_dict(py, output_ids, modifier_rows)?.into_py(py))
+        Ok(self.build_result_object(py, output_ids, modifier_rows))
     }
 
     fn process_ids_batch(&self, raw_ids_batch: Vec<Vec<u32>>, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyList::empty_bound(py);
         for raw_ids in raw_ids_batch {
             let (output_ids, modifier_rows) = self.process_ids_impl(&raw_ids);
-            out.append(self.build_result_dict(py, output_ids, modifier_rows)?)?;
+            out.append(self.build_result_object(py, output_ids, modifier_rows))?;
         }
         Ok(out.into_py(py))
     }
@@ -187,15 +180,23 @@ impl CompositionalProcessor {
     fn process_text(&self, text: String, py: Python<'_>) -> PyResult<PyObject> {
         let raw_ids = self.encode_text_impl(text.as_str())?;
         let (output_ids, modifier_rows) = self.process_ids_impl(&raw_ids);
-        Ok(self.build_result_dict(py, output_ids, modifier_rows)?.into_py(py))
+        Ok(self.build_result_object(py, output_ids, modifier_rows))
     }
 
     fn process_text_batch(&self, texts: Vec<String>, py: Python<'_>) -> PyResult<PyObject> {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Rust compositional processor has no tokenizer_json configured."))?;
+        let input_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let encodings = tokenizer
+            .encode_batch(input_refs, false)
+            .map_err(|e| PyValueError::new_err(format!("Failed to encode batch in Rust compositional processor: {e}")))?;
         let out = PyList::empty_bound(py);
-        for text in texts {
-            let raw_ids = self.encode_text_impl(text.as_str())?;
+        for encoding in encodings {
+            let raw_ids: Vec<u32> = encoding.get_ids().iter().map(|v| *v as u32).collect();
             let (output_ids, modifier_rows) = self.process_ids_impl(&raw_ids);
-            out.append(self.build_result_dict(py, output_ids, modifier_rows)?)?;
+            out.append(self.build_result_object(py, output_ids, modifier_rows))?;
         }
         Ok(out.into_py(py))
     }

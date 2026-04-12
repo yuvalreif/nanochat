@@ -52,6 +52,9 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--tokenizer-threads", type=int, default=4, help="threads for baseline tiktoken batch encoding")
+parser.add_argument("--tokenizer-batch-size", type=int, default=128, help="documents per tokenization batch pulled from each row group")
+parser.add_argument("--loader-buffer-size", type=int, default=1000, help="target number of tokenized documents kept in the best-fit packing buffer")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -130,6 +133,7 @@ user_config["compositional_mode"] = compositional_mode
 user_config["modifier_group_sizes"] = list(modifier_group_sizes)
 if compositional_mode:
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
+    print0(f"Compositional tokenizer backend: {'rust' if getattr(tokenizer, 'rust_backend', None) is not None else 'python'}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model
@@ -342,6 +346,9 @@ train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
     args.device_batch_size,
     args.max_seq_len,
     split="train",
+    tokenizer_threads=args.tokenizer_threads,
+    tokenizer_batch_size=args.tokenizer_batch_size,
+    buffer_size=args.loader_buffer_size,
     device=device,
     resume_state_dict=dataloader_resume_state_dict,
     with_modifiers=compositional_mode,
@@ -351,6 +358,9 @@ build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
     args.device_batch_size,
     args.max_seq_len,
     split="val",
+    tokenizer_threads=args.tokenizer_threads,
+    tokenizer_batch_size=args.tokenizer_batch_size,
+    buffer_size=args.loader_buffer_size,
     device=device,
     with_modifiers=compositional_mode,
 )
