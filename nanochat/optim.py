@@ -49,6 +49,29 @@ def adamw_step_fused(
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
+
+def adamw_step_eager(
+    p: Tensor,
+    grad: Tensor,
+    exp_avg: Tensor,
+    exp_avg_sq: Tensor,
+    step_t: Tensor,
+    lr_t: Tensor,
+    beta1_t: Tensor,
+    beta2_t: Tensor,
+    eps_t: Tensor,
+    wd_t: Tensor,
+) -> None:
+    """Eager AdamW step for heterogeneous small parameter families."""
+    p.mul_(1 - lr_t * wd_t)
+    exp_avg.lerp_(grad, 1 - beta1_t)
+    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
+    bias1 = 1 - beta1_t ** step_t
+    bias2 = 1 - beta2_t ** step_t
+    denom = (exp_avg_sq / bias2).sqrt() + eps_t
+    step_size = lr_t / bias1
+    p.add_(exp_avg / denom, alpha=-step_size)
+
 # -----------------------------------------------------------------------------
 """
 Muon optimizer adapted and simplified from modded-nanogpt.
@@ -220,9 +243,8 @@ class MuonAdamW(torch.optim.Optimizer):
             self._adamw_beta2_t.fill_(group['betas'][1])
             self._adamw_eps_t.fill_(group['eps'])
             self._adamw_wd_t.fill_(group['weight_decay'])
-
-            # Fused update: weight_decay -> momentum -> bias_correction -> param_update
-            adamw_step_fused(
+            adamw_step = adamw_step_fused if group.get("fused_adamw", True) else adamw_step_eager
+            adamw_step(
                 p, grad, exp_avg, exp_avg_sq,
                 self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t,
                 self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t,
@@ -437,7 +459,8 @@ class DistMuonAdamW(torch.optim.Optimizer):
             self._adamw_beta2_t.fill_(group['betas'][1])
             self._adamw_eps_t.fill_(group['eps'])
             self._adamw_wd_t.fill_(group['weight_decay'])
-            adamw_step_fused(
+            adamw_step = adamw_step_fused if group.get("fused_adamw", True) else adamw_step_eager
+            adamw_step(
                 p_slice, grad_slice, state['exp_avg'], state['exp_avg_sq'],
                 self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t,
                 self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t,

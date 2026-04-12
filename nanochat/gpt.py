@@ -402,12 +402,24 @@ class GPT(nn.Module):
         # Separate out all parameters into groups
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
-        embedding_params = list(self.transformer.wte.parameters()) + list(self.modifier_embeds.parameters()) + list(self.modifier_base_biases.parameters())
-        lm_head_params = list(self.lm_head.parameters()) + list(self.modifier_heads.parameters())
+        token_embedding_params = list(self.transformer.wte.parameters())
+        modifier_embedding_params = list(self.modifier_embeds.parameters()) + list(self.modifier_base_biases.parameters())
+        lm_head_params = list(self.lm_head.parameters())
+        modifier_head_params = list(self.modifier_heads.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
+        assert len(list(self.parameters())) == (
+            len(matrix_params)
+            + len(token_embedding_params)
+            + len(modifier_embedding_params)
+            + len(lm_head_params)
+            + len(modifier_head_params)
+            + len(value_embeds_params)
+            + len(resid_params)
+            + len(x0_params)
+            + len(smear_params)
+        )
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -417,7 +429,9 @@ class GPT(nn.Module):
         param_groups = [
             # AdamW groups (embeddings, lm_head, scalars)
             dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=(0.8, 0.96), eps=1e-10, weight_decay=0.01),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001),
+            dict(kind='adamw', params=modifier_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=(0.8, 0.96), eps=1e-10, weight_decay=0.01, fused_adamw=False),
+            dict(kind='adamw', params=token_embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001),
+            dict(kind='adamw', params=modifier_embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001, fused_adamw=False),
             dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.01),
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.05),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
