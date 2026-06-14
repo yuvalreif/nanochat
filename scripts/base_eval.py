@@ -211,7 +211,11 @@ def main():
         token_bytes = get_token_bytes(device=device)
         model_name = f"base_model (step {meta['step']})"
         model_slug = f"base_model_{meta['step']:06d}"
-
+    compositional_mode = bool(
+        not is_hf_model
+        and hasattr(tokenizer, "has_compositional_mode")
+        and tokenizer.has_compositional_mode()
+    )
     print0(f"Evaluating model: {model_name}")
     print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
 
@@ -239,18 +243,37 @@ def main():
             engine = Engine(model, tokenizer)
             print0("\nConditioned samples:")
             for prompt in prompts:
-                tokens = tokenizer(prompt, prepend="<|bos|>")
+                if compositional_mode:
+                    tokens = tokenizer.encode_with_modifiers(prompt, prepend="<|bos|>")
+                else:
+                    tokens = tokenizer(prompt, prepend="<|bos|>")
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-                sample_str = tokenizer.decode(sample[0])
+                if compositional_mode:
+                    sample_ids, sample_mods = sample
+                    sample_str = tokenizer.decode_with_modifiers(sample_ids[0], sample_mods[0])
+                else:
+                    sample_str = tokenizer.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
                 samples.append(sample_str)
 
             print0("\nUnconditioned samples:")
-            tokens = tokenizer("", prepend="<|bos|>")
+            if compositional_mode:
+                tokens = tokenizer.encode_with_modifiers("", prepend="<|bos|>")
+            else:
+                tokens = tokenizer("", prepend="<|bos|>")
             uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
-            for sample in uncond:
-                sample_str = tokenizer.decode(sample)
+            if compositional_mode:
+                uncond_ids, uncond_mods = uncond
+                iterator = zip(uncond_ids, uncond_mods)
+            else:
+                iterator = ((sample, None) for sample in uncond)
+            for sample_ids, sample_mods in iterator:
+                sample_str = (
+                    tokenizer.decode_with_modifiers(sample_ids, sample_mods)
+                    if compositional_mode
+                    else tokenizer.decode(sample_ids)
+                )
                 print0("-" * 80)
                 print0(sample_str)
                 unconditioned_samples.append(sample_str)
@@ -270,8 +293,21 @@ def main():
         steps = args.split_tokens // tokens_per_step
 
         for split_name in ["train", "val"]:
-            loader = tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, sequence_len, split_name, device=device)
-            bpb = evaluate_bpb(model, loader, steps, token_bytes)
+            loader = tokenizing_distributed_data_loader_bos_bestfit(
+                tokenizer,
+                args.device_batch_size,
+                sequence_len,
+                split_name,
+                device=device,
+                with_modifiers=compositional_mode,
+            )
+            bpb = evaluate_bpb(
+                model,
+                loader,
+                steps,
+                token_bytes,
+                tokenizer=tokenizer,
+            )
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")
 

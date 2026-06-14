@@ -22,6 +22,10 @@ def log0(message):
 
 def _patch_missing_config_keys(model_config_kwargs):
     """Add default values for new config keys missing in old checkpoints."""
+    model_config_kwargs.pop("modifier_group_reduction", None)
+    model_config_kwargs.pop("modifier_conditioning_mode", None)
+    model_config_kwargs.pop("use_smear", None)
+    model_config_kwargs.pop("use_backout", None)
     # Old models were trained with full context (no sliding window)
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"

@@ -37,6 +37,8 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    modifier_group_sizes: tuple[int, ...] = ()
+    modifier_loss_weight: float = 1.0
 
 
 def norm(x):
@@ -173,6 +175,23 @@ class GPT(nn.Module):
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
         self.lm_head = Linear(config.n_embd, padded_vocab_size, bias=False)
+        self.modifier_group_sizes = tuple(int(v) for v in (config.modifier_group_sizes or ()))
+        self.num_modifier_groups = len(self.modifier_group_sizes)
+        self.total_modifier_size = sum(self.modifier_group_sizes)
+        modifier_offsets = []
+        offset = 0
+        for group_size in self.modifier_group_sizes:
+            modifier_offsets.append(offset)
+            offset += group_size
+        self.modifier_group_offsets = tuple(modifier_offsets)
+        self.modifier_embed = nn.Embedding(self.total_modifier_size, config.n_embd) if self.total_modifier_size > 0 else None
+        self.modifier_head = Linear(config.n_embd, self.total_modifier_size, bias=False) if self.total_modifier_size > 0 else None
+        self.modifier_base_proj = None
+        self.modifier_gate = None
+        if self.total_modifier_size > 0:
+            # z = W_h h + g(h) * W_b b, where b comes from unembedding rows.
+            self.modifier_base_proj = Linear(config.n_embd, self.total_modifier_size, bias=False)
+            self.modifier_gate = Linear(config.n_embd, 1, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
         # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
@@ -217,6 +236,15 @@ class GPT(nn.Module):
         # Embedding and unembedding
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
+        if self.modifier_embed is not None:
+            torch.nn.init.normal_(self.modifier_embed.weight, mean=0.0, std=0.8)
+        if self.modifier_head is not None:
+            torch.nn.init.normal_(self.modifier_head.weight, mean=0.0, std=0.001)
+        if self.modifier_base_proj is not None:
+            torch.nn.init.normal_(self.modifier_base_proj.weight, mean=0.0, std=0.001)
+        if self.modifier_gate is not None:
+            # no bias term; zero init => g = sigmoid(0) = 0.5 at init.
+            torch.nn.init.zeros_(self.modifier_gate.weight)
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
         n_embd = self.config.n_embd
@@ -238,7 +266,7 @@ class GPT(nn.Module):
         for i in range(n_layer):
             self.x0_lambdas.data[i] = 0.20 - (0.15 * i / max(n_layer - 1, 1))
 
-        # Smear/backout scalars and smear gate must be explicitly initialized 
+        # Smear/backout scalars and smear gate must be explicitly initialized.
         torch.nn.init.zeros_(self.smear_lambda)
         torch.nn.init.constant_(self.backout_lambda, 0.2)
         torch.nn.init.uniform_(self.smear_gate.weight, 0.0, 0.02)
@@ -262,6 +290,8 @@ class GPT(nn.Module):
         # because GradScaler cannot unscale fp16 gradients.
         if COMPUTE_DTYPE != torch.float16:
             self.transformer.wte.to(dtype=COMPUTE_DTYPE)
+            if self.modifier_embed is not None:
+                self.modifier_embed.to(dtype=COMPUTE_DTYPE)
             for ve in self.value_embeds.values():
                 ve.to(dtype=COMPUTE_DTYPE)
 
@@ -328,8 +358,9 @@ class GPT(nn.Module):
         """
         nparams = sum(p.numel() for p in self.parameters())
         # Exclude non-matmul params: embeddings and per-layer scalars
+        modifier_embeds_numel = 0 if self.modifier_embed is None else self.modifier_embed.weight.numel()
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
-        nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
+        nparams_exclude = (self.transformer.wte.weight.numel() + modifier_embeds_numel + value_embeds_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel() +
                           self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel())
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
@@ -356,14 +387,24 @@ class GPT(nn.Module):
         """
         # Count each group separately (mirrors the grouping in setup_optimizers)
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        modifier_embeds = 0 if self.modifier_embed is None else sum(p.numel() for p in self.modifier_embed.parameters())
+        modifier_heads = 0 if self.modifier_head is None else sum(p.numel() for p in self.modifier_head.parameters())
+        modifier_conditioners = 0
+        if self.modifier_base_proj is not None:
+            modifier_conditioners += sum(p.numel() for p in self.modifier_base_proj.parameters())
+        if self.modifier_gate is not None:
+            modifier_conditioners += sum(p.numel() for p in self.modifier_gate.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        total = wte + modifier_embeds + modifier_heads + modifier_conditioners + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
         return {
             'wte': wte,
+            'modifier_embeds': modifier_embeds,
+            'modifier_heads': modifier_heads,
+            'modifier_conditioners': modifier_conditioners,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
             'transformer_matrices': transformer_matrices,
@@ -379,26 +420,77 @@ class GPT(nn.Module):
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
+        if self.modifier_embed is not None:
+            embedding_params += list(self.modifier_embed.parameters())
         lm_head_params = list(self.lm_head.parameters())
+        if self.modifier_head is not None:
+            lm_head_params += list(self.modifier_head.parameters())
+        if self.modifier_base_proj is not None:
+            lm_head_params += list(self.modifier_base_proj.parameters())
+        if self.modifier_gate is not None:
+            lm_head_params += list(self.modifier_gate.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
+        assert len(list(self.parameters())) == (
+            len(matrix_params)
+            + len(embedding_params)
+            + len(lm_head_params)
+            + len(value_embeds_params)
+            + len(resid_params)
+            + len(x0_params)
+            + len(smear_params)
+        )
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
         print0(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
 
+        def _append_adamw_groups(param_groups, params, *, lr, betas, eps, weight_decay):
+            # Keep AdamW groups rank-homogeneous to reduce torch.compile specialization churn.
+            buckets = {}
+            for p in params:
+                buckets.setdefault(int(p.ndim), []).append(p)
+            for ndim in sorted(buckets.keys()):
+                group_params = buckets[ndim]
+                if not group_params:
+                    continue
+                param_groups.append(dict(
+                    kind='adamw',
+                    params=group_params,
+                    lr=lr,
+                    betas=betas,
+                    eps=eps,
+                    weight_decay=weight_decay,
+                ))
+
         # Build param_groups with all required fields explicit
-        param_groups = [
-            # AdamW groups (embeddings, lm_head, scalars)
-            dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=(0.8, 0.96), eps=1e-10, weight_decay=0.01),
-            dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001),
-            dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.01),
-            dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.05),
-            dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
-            dict(kind='adamw', params=smear_params, lr=0.2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
-        ]
+        param_groups = []
+        # AdamW groups (embeddings, lm_head, scalars)
+        _append_adamw_groups(
+            param_groups, lm_head_params,
+            lr=unembedding_lr * dmodel_lr_scale, betas=(0.8, 0.96), eps=1e-10, weight_decay=0.01,
+        )
+        _append_adamw_groups(
+            param_groups, embedding_params,
+            lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001,
+        )
+        _append_adamw_groups(
+            param_groups, value_embeds_params,
+            lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.01,
+        )
+        _append_adamw_groups(
+            param_groups, resid_params,
+            lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.05,
+        )
+        _append_adamw_groups(
+            param_groups, x0_params,
+            lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0,
+        )  # higher beta1 for x0
+        _append_adamw_groups(
+            param_groups, smear_params,
+            lr=0.2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0,
+        )
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
@@ -413,7 +505,104 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def _modifier_offset_ids(self, modifier_ids):
+        if self.num_modifier_groups == 0:
+            raise ValueError("modifier_ids were provided but the model has no modifier groups configured.")
+        if modifier_ids.dim() != 3:
+            raise ValueError(
+                f"modifier_ids must have shape [B, T, G], got {tuple(modifier_ids.shape)}"
+            )
+        if modifier_ids.size(-1) != self.num_modifier_groups:
+            raise ValueError(
+                f"modifier_ids group mismatch: expected {self.num_modifier_groups}, got {modifier_ids.size(-1)}"
+            )
+        modifier_ids = modifier_ids.long()
+        group_sizes = torch.tensor(self.modifier_group_sizes, dtype=torch.long, device=modifier_ids.device).view(1, 1, -1)
+        bad_mask = (modifier_ids < 0) | (modifier_ids >= group_sizes)
+        if bad_mask.any():
+            bad_indices = bad_mask.nonzero(as_tuple=False)[0].detach().cpu().tolist()
+            bad_value = int(modifier_ids[tuple(bad_indices)].detach().cpu().item())
+            group_idx = int(bad_indices[-1])
+            raise ValueError(
+                f"modifier_ids out of range for group {group_idx}: "
+                f"group_size={self.modifier_group_sizes[group_idx]}, sample_bad_id={bad_value}"
+            )
+        offsets = torch.tensor(self.modifier_group_offsets, dtype=torch.long, device=modifier_ids.device).view(1, 1, -1)
+        return modifier_ids + offsets
+
+    def _modifier_embed_sum(self, modifier_ids):
+        if modifier_ids is None:
+            return None
+        offset_ids = self._modifier_offset_ids(modifier_ids)
+        return self.modifier_embed(offset_ids).sum(dim=-2)
+
+    def get_modifier_logits(self, x, token_ids):
+        if self.num_modifier_groups == 0:
+            return []
+        if x.dim() != 3:
+            raise ValueError(f"x must have shape [B, T, C], got {tuple(x.shape)}")
+        if token_ids.shape != x.shape[:2]:
+            raise ValueError(
+                "token_ids must match x shape in the first two dimensions: "
+                f"{tuple(token_ids.shape)} != {tuple(x.shape[:2])}"
+            )
+        x_flat = x.view(-1, x.size(-1))
+        token_flat = token_ids.view(-1).long()
+        base_rep = F.embedding(token_flat, self.lm_head.weight)
+        if base_rep.dtype != x_flat.dtype:
+            base_rep = base_rep.to(dtype=x_flat.dtype)
+        hidden_logits = self.modifier_head(norm(x_flat))
+        base_logits = self.modifier_base_proj(norm(base_rep))
+        gate = torch.sigmoid(self.modifier_gate(x_flat))
+        if gate.dtype != base_logits.dtype:
+            gate = gate.to(dtype=base_logits.dtype)
+        all_logits = hidden_logits + gate * base_logits
+        outputs = []
+        for group_idx, group_size in enumerate(self.modifier_group_sizes):
+            start = self.modifier_group_offsets[group_idx]
+            end = start + group_size
+            outputs.append(all_logits[:, start:end].view(*token_ids.shape, group_size))
+        return outputs
+
+    def _modifier_loss(self, x, targets, target_modifier_ids, loss_reduction):
+        if self.num_modifier_groups == 0 or target_modifier_ids is None:
+            return None
+        if target_modifier_ids.dim() != 3:
+            raise ValueError(
+                "target_modifier_ids must have shape [B, T, G], "
+                f"got {tuple(target_modifier_ids.shape)}"
+            )
+        if target_modifier_ids.shape[:2] != targets.shape:
+            raise ValueError(
+                "target_modifier_ids must match targets shape in the first two dimensions: "
+                f"{tuple(target_modifier_ids.shape[:2])} != {tuple(targets.shape)}"
+            )
+        if target_modifier_ids.size(-1) != self.num_modifier_groups:
+            raise ValueError(
+                f"target_modifier_ids group mismatch: expected {self.num_modifier_groups}, got {target_modifier_ids.size(-1)}"
+            )
+
+        valid_targets = targets >= 0
+        safe_targets = torch.where(valid_targets, targets, torch.zeros_like(targets))
+        modifier_logits = self.get_modifier_logits(x, safe_targets)
+        modifier_loss = None
+        for group_idx, group_logits in enumerate(modifier_logits):
+            group_targets = target_modifier_ids[..., group_idx].long()
+            group_targets = torch.where(
+                valid_targets,
+                group_targets,
+                torch.full_like(group_targets, -1),
+            )
+            group_loss = F.cross_entropy(
+                group_logits.view(-1, group_logits.size(-1)),
+                group_targets.reshape(-1),
+                ignore_index=-1,
+                reduction=loss_reduction,
+            )
+            modifier_loss = group_loss if modifier_loss is None else modifier_loss + group_loss
+        return modifier_loss
+
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', modifier_ids=None, target_modifier_ids=None, return_hidden=False, return_hidden_only=False):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -426,6 +615,8 @@ class GPT(nn.Module):
 
         # Embed the tokens
         x = self.transformer.wte(idx) # embed current token
+        if modifier_ids is not None:
+            x = x + self._modifier_embed_sum(modifier_ids).to(dtype=x.dtype)
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
 
@@ -464,6 +655,9 @@ class GPT(nn.Module):
             x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = norm(x)
 
+        if return_hidden_only:
+            return x
+
         # Forward the lm_head (compute logits)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
@@ -475,9 +669,14 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            modifier_loss = self._modifier_loss(x, targets, target_modifier_ids, loss_reduction)
+            if modifier_loss is not None:
+                loss = loss + float(self.config.modifier_loss_weight) * modifier_loss
             return loss
         else:
             # inference: just return the logits directly
+            if return_hidden:
+                return logits, x
             return logits
 
     @torch.inference_mode()

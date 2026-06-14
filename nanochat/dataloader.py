@@ -22,6 +22,53 @@ import pyarrow.parquet as pq
 from nanochat.common import get_dist_info
 from nanochat.dataset import list_parquet_files
 
+
+def _resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
+    if not with_modifiers:
+        return 0
+    if not hasattr(tokenizer, "encode_with_modifiers"):
+        raise ValueError(
+            "with_modifiers=True requires tokenizer.encode_with_modifiers(...) support."
+        )
+    get_num_modifier_groups = getattr(tokenizer, "get_num_modifier_groups", None)
+    if get_num_modifier_groups is None:
+        raise ValueError(
+            "with_modifiers=True requires tokenizer.get_num_modifier_groups() support."
+        )
+    num_modifier_groups = int(get_num_modifier_groups())
+    if num_modifier_groups <= 0:
+        raise ValueError(
+            f"with_modifiers=True requires num_modifier_groups > 0, got {num_modifier_groups}"
+        )
+    return num_modifier_groups
+
+
+def _encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with_modifiers):
+    if with_modifiers:
+        encoded = tokenizer.encode_with_modifiers(
+            doc_batch, prepend=bos_token, num_threads=tokenizer_threads
+        )
+        out = []
+        for token_ids, modifier_rows in encoded:
+            if len(token_ids) != len(modifier_rows):
+                raise ValueError(
+                    "Compositional tokenizer returned mismatched token/modifier lengths: "
+                    f"{len(token_ids)} != {len(modifier_rows)}"
+                )
+            out.append((token_ids, modifier_rows))
+        return out
+
+    token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+    return [(tokens, None) for tokens in token_lists]
+
+
+def _copy_doc_span(row_buffer, row_mod_buffer, *, row_idx, pos, token_ids, modifier_rows, take):
+    row_buffer[row_idx, pos:pos + take] = torch.tensor(token_ids[:take], dtype=torch.long)
+    if row_mod_buffer is not None:
+        row_mod_buffer[row_idx, pos:pos + take] = torch.tensor(
+            modifier_rows[:take], dtype=torch.long
+        )
+
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
     Infinite iterator over document batches (list of text strings) from parquet files.
@@ -75,7 +122,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     tokenizer, B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    buffer_size=1000
+    buffer_size=1000, with_modifiers=False
 ):
     """
     BOS-aligned dataloader with Best-Fit Cropping.
@@ -97,16 +144,26 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
 
     row_capacity = T + 1
     batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
-    bos_token = tokenizer.get_bos_token_id()
     doc_buffer = []
     pq_idx, rg_idx, epoch = 0, 0, 1
+    num_modifier_groups = _resolve_num_modifier_groups(
+        tokenizer,
+        with_modifiers=with_modifiers,
+    )
+    bos_token = tokenizer.get_bos_token_id()
 
     def refill_buffer():
         nonlocal pq_idx, rg_idx, epoch
         doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-        for tokens in token_lists:
-            doc_buffer.append(tokens)
+        doc_buffer.extend(
+            _encode_doc_batch(
+                tokenizer,
+                doc_batch,
+                bos_token=bos_token,
+                tokenizer_threads=tokenizer_threads,
+                with_modifiers=with_modifiers,
+            )
+        )
 
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
     # This gives us contiguous views and a single HtoD transfer
@@ -118,6 +175,18 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     cpu_targets = cpu_buffer[B * T:].view(B, T)
     inputs = gpu_buffer[:B * T].view(B, T)
     targets = gpu_buffer[B * T:].view(B, T)
+    if with_modifiers:
+        row_mod_buffer = torch.empty((B, row_capacity, num_modifier_groups), dtype=torch.long)
+        cpu_mod_buffer = torch.empty(
+            2 * B * T * num_modifier_groups, dtype=torch.long, pin_memory=use_cuda
+        )
+        gpu_mod_buffer = torch.empty(
+            2 * B * T * num_modifier_groups, dtype=torch.long, device=device
+        )
+        cpu_input_mods = cpu_mod_buffer[: B * T * num_modifier_groups].view(B, T, num_modifier_groups)
+        cpu_target_mods = cpu_mod_buffer[B * T * num_modifier_groups :].view(B, T, num_modifier_groups)
+        input_mods = gpu_mod_buffer[: B * T * num_modifier_groups].view(B, T, num_modifier_groups)
+        target_mods = gpu_mod_buffer[B * T * num_modifier_groups :].view(B, T, num_modifier_groups)
 
     while True:
         for row_idx in range(B):
@@ -133,32 +202,58 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 best_idx = -1
                 best_len = 0
                 for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
+                    doc_len = len(doc[0])
                     if doc_len <= remaining and doc_len > best_len:
                         best_idx = i
                         best_len = doc_len
 
                 if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    doc_len = len(doc)
-                    row_buffer[row_idx, pos:pos + doc_len] = torch.tensor(doc, dtype=torch.long)
+                    doc_tokens, doc_mods = doc_buffer.pop(best_idx)
+                    doc_len = len(doc_tokens)
+                    _copy_doc_span(
+                        row_buffer,
+                        row_mod_buffer if with_modifiers else None,
+                        row_idx=row_idx,
+                        pos=pos,
+                        token_ids=doc_tokens,
+                        modifier_rows=doc_mods,
+                        take=doc_len,
+                    )
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
+                    shortest_idx = min(
+                        range(len(doc_buffer)),
+                        key=lambda i: len(doc_buffer[i][0]),
+                    )
+                    doc_tokens, doc_mods = doc_buffer.pop(shortest_idx)
+                    _copy_doc_span(
+                        row_buffer,
+                        row_mod_buffer if with_modifiers else None,
+                        row_idx=row_idx,
+                        pos=pos,
+                        token_ids=doc_tokens,
+                        modifier_rows=doc_mods,
+                        take=remaining,
+                    )
                     pos += remaining
 
         # Copy to pinned CPU buffer, then single HtoD transfer
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
+        if with_modifiers:
+            cpu_input_mods.copy_(row_mod_buffer[:, :-1])
+            cpu_target_mods.copy_(row_mod_buffer[:, 1:])
 
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx, "epoch": epoch}
 
         # Single HtoD copy into persistent GPU buffer and yield
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)
-        yield inputs, targets, state_dict
+        if with_modifiers:
+            gpu_mod_buffer.copy_(cpu_mod_buffer, non_blocking=use_cuda)
+            yield (inputs, input_mods), (targets, target_mods), state_dict
+        else:
+            yield inputs, targets, state_dict
 
 def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
     """Helper that omits state_dict from yields."""

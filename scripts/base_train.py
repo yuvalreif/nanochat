@@ -122,6 +122,15 @@ tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
+compositional_mode = bool(
+    hasattr(tokenizer, "has_compositional_mode") and tokenizer.has_compositional_mode()
+)
+modifier_group_sizes = tuple(tokenizer.get_modifier_group_sizes()) if compositional_mode else ()
+user_config["compositional_mode"] = compositional_mode
+user_config["modifier_group_sizes"] = list(modifier_group_sizes)
+if compositional_mode:
+    print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
+    print0(f"Compositional tokenizer backend: {'rust' if getattr(tokenizer, 'rust_backend', None) is not None else 'python'}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model
@@ -137,6 +146,7 @@ def build_model_meta(depth):
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern,
+        modifier_group_sizes=modifier_group_sizes,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -263,7 +273,7 @@ print0(f"Estimated FLOPs per token: {num_flops_per_token:e}")
 def get_scaling_params(m):
     # As for which params to use exactly, transformer matrices + lm_head gives cleanest scaling laws (see dev/LOG.md Jan 27, 2026)
     params_counts = m.num_scaling_params()
-    scaling_params = params_counts['transformer_matrices'] + params_counts['lm_head']
+    scaling_params = params_counts['transformer_matrices'] + params_counts['lm_head'] + params_counts.get('modifier_heads', 0)
     return scaling_params
 num_scaling_params = get_scaling_params(model)
 target_tokens = int(args.target_param_data_ratio * num_scaling_params) # optimal tokens for the model we are about to train
@@ -328,8 +338,23 @@ if scaler is not None:
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
+train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
+    tokenizer,
+    args.device_batch_size,
+    args.max_seq_len,
+    split="train",
+    device=device,
+    resume_state_dict=dataloader_resume_state_dict,
+    with_modifiers=compositional_mode,
+)
+build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
+    tokenizer,
+    args.device_batch_size,
+    args.max_seq_len,
+    split="val",
+    device=device,
+    with_modifiers=compositional_mode,
+)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------
@@ -423,7 +448,7 @@ while True:
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
         with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes, tokenizer=tokenizer)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -467,10 +492,17 @@ while True:
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
+            if compositional_mode:
+                tokens = tokenizer.encode_with_modifiers(prompt, prepend="<|bos|>")
+            else:
+                tokens = tokenizer(prompt, prepend="<|bos|>")
             with disable_fp8(orig_model):
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            print0(tokenizer.decode(sample[0]))
+            if compositional_mode:
+                sample_ids, sample_mods = sample
+                print0(tokenizer.decode_with_modifiers(sample_ids[0], sample_mods[0]))
+            else:
+                print0(tokenizer.decode(sample[0]))
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
@@ -508,7 +540,12 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
-        loss = model(x, y)
+        if compositional_mode:
+            x_ids, x_mods = x
+            y_ids, y_mods = y
+            loss = model(x_ids, y_ids, modifier_ids=x_mods, target_modifier_ids=y_mods)
+        else:
+            loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
