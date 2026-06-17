@@ -27,7 +27,7 @@ def _space_value_adds_prefix_space(value_name: str, rel_idx: int, default_idx: i
 def _build_compositional_bpb_tables(tokenizer, token_bytes, *, device):
     spec = getattr(tokenizer, "spec", None)
     if spec is None:
-        return None, None, None
+        return None, None, None, None
     cache = getattr(tokenizer, "_bpb_modifier_tables_cache", {})
     cache_key = (str(device), str(token_bytes.dtype), int(token_bytes.numel()))
     cached = cache.get(cache_key)
@@ -35,12 +35,24 @@ def _build_compositional_bpb_tables(tokenizer, token_bytes, *, device):
         return cached
 
     base_bytes = token_bytes.detach().to("cpu").clone()
+    stripped_base_bytes = base_bytes.clone()
     token_bytes_by_id = getattr(tokenizer, "_token_bytes_by_id", None)
     if callable(token_bytes_by_id):
         for token_id, raw_bytes in token_bytes_by_id().items():
             if 0 <= int(token_id) < int(base_bytes.numel()) and int(base_bytes[int(token_id)]) > 0:
+                raw_bytes = bytes(raw_bytes)
                 base_bytes[int(token_id)] = len(raw_bytes)
+                try:
+                    raw_text = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    stripped_base_bytes[int(token_id)] = len(raw_bytes)
+                else:
+                    if raw_text and raw_text.strip() != "":
+                        stripped_base_bytes[int(token_id)] = len(raw_bytes.lstrip(b" "))
+                    else:
+                        stripped_base_bytes[int(token_id)] = len(raw_bytes)
     base_bytes = base_bytes.to(device=device)
+    stripped_base_bytes = stripped_base_bytes.to(device=device)
 
     group_sizes = [int(v) for v in spec.modifier_group_sizes]
     num_groups = int(spec.num_modifier_groups)
@@ -91,7 +103,7 @@ def _build_compositional_bpb_tables(tokenizer, token_bytes, *, device):
                 delta_table[group_idx, rel_idx] = int(delta)
                 supported_table[group_idx, rel_idx] = True
 
-    cached = (base_bytes, delta_table, supported_table)
+    cached = (base_bytes, stripped_base_bytes, delta_table, supported_table)
     cache[cache_key] = cached
     setattr(tokenizer, "_bpb_modifier_tables_cache", cache)
     return cached
@@ -130,23 +142,30 @@ def _compositional_target_bytes(y, y_mods, token_bytes, tokenizer):
     valid = y_flat >= 0
     y_safe = torch.where(valid, y_flat, torch.zeros_like(y_flat))
     num_bytes = torch.zeros_like(y_flat, dtype=token_bytes.dtype)
-    base_bytes, delta_table, supported_table = _build_compositional_bpb_tables(
+    base_bytes, stripped_base_bytes, delta_table, supported_table = _build_compositional_bpb_tables(
         tokenizer,
         token_bytes,
         device=token_bytes.device,
     )
-    if base_bytes is not None and delta_table is not None and supported_table is not None:
-        num_bytes = torch.where(valid, base_bytes[y_safe], num_bytes)
+    if base_bytes is not None and stripped_base_bytes is not None and delta_table is not None and supported_table is not None:
         group_ids = torch.arange(mods_flat.size(1), device=mods_flat.device).view(1, -1)
         max_group_size = delta_table.size(1)
         mods_safe = torch.clamp(mods_flat.to(torch.long), min=0, max=max_group_size - 1)
         deltas = delta_table[group_ids, mods_safe]
         supported = supported_table[group_ids, mods_safe].all(dim=-1)
-        counted = valid & (num_bytes > 0) & supported
+        default_modifier = torch.tensor(
+            [int(v) for v in tokenizer.spec.default_modifier],
+            dtype=torch.long,
+            device=mods_flat.device,
+        ).view(1, -1)
+        is_default = (mods_flat.to(torch.long) == default_modifier).all(dim=-1)
+        base_for_row = torch.where(is_default, base_bytes[y_safe], stripped_base_bytes[y_safe])
+        num_bytes = torch.where(valid, base_for_row, num_bytes)
+        counted = valid & (base_bytes[y_safe] > 0) & supported
         if counted.any():
             delta_sum = deltas.sum(dim=-1).to(dtype=token_bytes.dtype)
             num_bytes[counted] = num_bytes[counted] + delta_sum[counted]
-        fallback = valid & (num_bytes > 0) & (~supported)
+        fallback = valid & (base_bytes[y_safe] > 0) & (~supported)
     elif valid.any():
         fallback = valid & (token_bytes[y_safe] > 0)
     else:

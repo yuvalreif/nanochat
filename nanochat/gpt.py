@@ -420,9 +420,9 @@ class GPT(nn.Module):
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
-        if self.modifier_embed is not None:
-            embedding_params += list(self.modifier_embed.parameters())
         lm_head_params = list(self.lm_head.parameters())
+        if self.modifier_embed is not None:
+            lm_head_params += list(self.modifier_embed.parameters())
         if self.modifier_head is not None:
             lm_head_params += list(self.modifier_head.parameters())
         if self.modifier_base_proj is not None:

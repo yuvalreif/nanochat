@@ -2,7 +2,8 @@ import math
 
 import torch
 
-from nanochat.loss_eval import evaluate_bpb
+from nanochat.compositional import CompositionalSpec
+from nanochat.loss_eval import _compositional_target_bytes, evaluate_bpb
 
 
 class MockEvalModel:
@@ -59,6 +60,46 @@ class MockCompositionalTokenizer:
         }
         return lookup[(int(token_id), tuple(int(v) for v in modifier_row))]
 
+
+class MockSpaceStrippingTokenizer:
+    def __init__(self):
+        self.base_id = 10
+        self.spec = CompositionalSpec.from_dict(
+            {
+                "version": 1,
+                "num_modifier_groups": 5,
+                "modifier_group_sizes": [2, 2, 2, 2, 2],
+                "group_names": [
+                    "space_prefix",
+                    "determiners",
+                    "prepositions",
+                    "prefix_punctuation",
+                    "suffix_punctuation",
+                ],
+                "group_value_names": {
+                    "space_prefix": ["no_space_prefix", "with_space_prefix"],
+                    "determiners": ["no_determiner", "article_the"],
+                    "prepositions": ["no_preposition", "prep_on"],
+                    "prefix_punctuation": ["no_prefix", 'punct_prefix_"'],
+                    "suffix_punctuation": ["no_suffix", "punct_suffix_."],
+                },
+                "default_modifier": [0, 0, 0, 0, 0],
+                "entries": [],
+            }
+        )
+
+    def _token_bytes_by_id(self):
+        return {self.base_id: b" dog"}
+
+    def _decode_base(self, token_ids):
+        assert token_ids == [self.base_id]
+        return " dog"
+
+    def decode_token_with_modifiers(self, token_id, modifier_row):
+        assert int(token_id) == self.base_id
+        return self.spec.surface_for_token(int(token_id), modifier_row, self._decode_base)
+
+
 def test_evaluate_bpb_passes_modifier_batches_and_counts_modified_bytes():
     model = MockEvalModel(loss_value=1.0)
     token_bytes = torch.zeros(32, dtype=torch.int64)
@@ -106,3 +147,32 @@ def test_evaluate_bpb_sums_modifier_group_losses():
     expected_nats = 0.5 + math.log(2.0) + math.log(4.0)
     expected_bpb = expected_nats / math.log(2)
     assert math.isclose(bpb, expected_bpb, rel_tol=1e-6)
+
+
+def test_compositional_target_bytes_strip_base_space_for_non_default_modifiers():
+    tokenizer = MockSpaceStrippingTokenizer()
+    rows = [
+        [0, 0, 0, 0, 0],  # default row preserves the literal base token surface: " dog"
+        [0, 0, 0, 0, 1],  # suffix punctuation: "dog."
+        [1, 0, 0, 0, 0],  # explicit space prefix: " dog"
+        [0, 1, 0, 0, 0],  # determiner/article: "the dog"
+        [0, 0, 1, 0, 0],  # preposition: "on dog"
+        [0, 0, 0, 1, 0],  # prefix punctuation: '"dog'
+        [1, 1, 1, 1, 1],  # combined additive modifiers: ' "on the dog.'
+    ]
+    token_bytes = torch.zeros(32, dtype=torch.int64)
+    token_bytes[tokenizer.base_id] = len(b" dog")
+    y = torch.full((1, len(rows)), tokenizer.base_id, dtype=torch.long)
+    y_mods = torch.tensor([rows], dtype=torch.long)
+
+    fast_lengths = _compositional_target_bytes(y, y_mods, token_bytes, tokenizer)
+    decoded_lengths = torch.tensor(
+        [
+            len(tokenizer.decode_token_with_modifiers(tokenizer.base_id, row).encode("utf-8"))
+            for row in rows
+        ],
+        dtype=torch.int64,
+    )
+
+    assert fast_lengths.tolist() == decoded_lengths.tolist()
+    assert decoded_lengths.tolist() == [4, 4, 4, 7, 6, 4, 13]

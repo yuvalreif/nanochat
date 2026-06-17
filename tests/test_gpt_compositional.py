@@ -69,3 +69,42 @@ def test_gpt_rejects_wrong_modifier_group_count():
         assert "group mismatch" in str(exc)
     else:
         raise AssertionError("Expected ValueError for wrong modifier group count")
+
+
+def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
+    model = _build_model(modifier_group_sizes=(3, 4))
+    unembedding_lr = 0.004
+    embedding_lr = 0.2
+    optimizer = model.setup_optimizer(
+        unembedding_lr=unembedding_lr,
+        embedding_lr=embedding_lr,
+    )
+    dmodel_lr_scale = (model.config.n_embd / 768) ** -0.5
+    expected_unembedding_lr = unembedding_lr * dmodel_lr_scale
+    expected_embedding_lr = embedding_lr * dmodel_lr_scale
+
+    def group_for(param):
+        for group in optimizer.param_groups:
+            if any(p is param for p in group["params"]):
+                return group
+        raise AssertionError("parameter not found in optimizer groups")
+
+    modifier_params = [
+        model.modifier_embed.weight,
+        model.modifier_head.weight,
+        model.modifier_base_proj.weight,
+        model.modifier_gate.weight,
+    ]
+    for param in modifier_params:
+        group = group_for(param)
+        assert group["kind"] == "adamw"
+        assert group["lr"] == expected_unembedding_lr
+        assert group["initial_lr"] == expected_unembedding_lr
+        assert group["betas"] == (0.8, 0.96)
+        assert group["weight_decay"] == 0.01
+
+    wte_group = group_for(model.transformer.wte.weight)
+    assert wte_group["kind"] == "adamw"
+    assert wte_group["lr"] == expected_embedding_lr
+    assert wte_group["betas"] == (0.8, 0.995)
+    assert wte_group["weight_decay"] == 0.001
