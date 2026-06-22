@@ -20,50 +20,9 @@ import torch
 import pyarrow.parquet as pq
 
 from nanochat.common import get_dist_info
+from nanochat.dataloader_utils import copy_doc_span, encode_doc_batch, resolve_num_modifier_groups
 from nanochat.dataset import list_parquet_files
 
-
-def _resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
-    if not with_modifiers:
-        return 0
-    if not (hasattr(tokenizer, "has_compositional_mode") and tokenizer.has_compositional_mode()):
-        raise ValueError(
-            "with_modifiers=True requires a compositional tokenizer."
-        )
-    get_num_modifier_groups = getattr(tokenizer, "get_num_modifier_groups", None)
-    if get_num_modifier_groups is None:
-        raise ValueError(
-            "with_modifiers=True requires tokenizer.get_num_modifier_groups() support."
-        )
-    num_modifier_groups = int(get_num_modifier_groups())
-    if num_modifier_groups <= 0:
-        raise ValueError(
-            f"with_modifiers=True requires num_modifier_groups > 0, got {num_modifier_groups}"
-        )
-    return num_modifier_groups
-
-
-def _encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with_modifiers):
-    encoded = tokenizer.encode_sequences(
-        doc_batch,
-        prepend=bos_token,
-        num_threads=tokenizer_threads,
-    )
-    if with_modifiers:
-        for seq in encoded:
-            if seq.modifiers is None:
-                raise ValueError("Compositional dataloader expected modifier rows.")
-    return encoded
-
-
-def _copy_doc_span(row_buffer, row_mod_buffer, *, row_idx, pos, doc, take):
-    row_buffer[row_idx, pos:pos + take] = torch.tensor(doc.ids[:take], dtype=torch.long)
-    if row_mod_buffer is not None:
-        if doc.modifiers is None:
-            raise ValueError("modifier rows are required when row_mod_buffer is set")
-        row_mod_buffer[row_idx, pos:pos + take] = torch.tensor(
-            doc.modifiers[:take], dtype=torch.long
-        )
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
@@ -142,7 +101,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
     doc_buffer = []
     pq_idx, rg_idx, epoch = 0, 0, 1
-    num_modifier_groups = _resolve_num_modifier_groups(
+    num_modifier_groups = resolve_num_modifier_groups(
         tokenizer,
         with_modifiers=with_modifiers,
     )
@@ -152,7 +111,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         nonlocal pq_idx, rg_idx, epoch
         doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
         doc_buffer.extend(
-            _encode_doc_batch(
+            encode_doc_batch(
                 tokenizer,
                 doc_batch,
                 bos_token=bos_token,
@@ -206,7 +165,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 if best_idx >= 0:
                     doc = doc_buffer.pop(best_idx)
                     doc_len = len(doc)
-                    _copy_doc_span(
+                    copy_doc_span(
                         row_buffer,
                         row_mod_buffer if with_modifiers else None,
                         row_idx=row_idx,
@@ -222,7 +181,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                         key=lambda i: len(doc_buffer[i]),
                     )
                     doc = doc_buffer.pop(shortest_idx)
-                    _copy_doc_span(
+                    copy_doc_span(
                         row_buffer,
                         row_mod_buffer if with_modifiers else None,
                         row_idx=row_idx,

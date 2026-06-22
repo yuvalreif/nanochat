@@ -3,17 +3,15 @@ Train a tokenizer using our own BPE Tokenizer library.
 In the style of GPT-4 tokenizer.
 """
 import os
-import json
 import time
 import argparse
 import torch
-from nanochat.tokenizer import (
-    RustBPETokenizer,
-    apply_space_cap_normalization,
-    detect_redundant_token_ids,
-    finalize_tokenizer_vocab,
+from nanochat.tokenizer import RustBPETokenizer
+from nanochat.cobpe_tokenizer_train import (
+    normalize_cobpe_training_text,
+    save_cobpe_metadata,
+    train_cobpe_tokenizer,
 )
-from nanochat.compositional import build_cobpe_metadata
 from nanochat.common import get_base_dir
 from nanochat.dataset import parquets_iter_batched
 
@@ -26,7 +24,6 @@ parser.add_argument('--doc-cap', type=int, default=10_000, help='Maximum charact
 parser.add_argument('--vocab-size', type=int, default=32768, help='Vocabulary size (default: 32768 = 2^15)')
 parser.add_argument('--cobpe', action='store_true', help='Train a CoBPE tokenizer and write compositional metadata')
 args = parser.parse_args()
-vocab_buffer_size = 512 if args.cobpe else 0
 print(f"max_chars: {args.max_chars:,}")
 print(f"doc_cap: {args.doc_cap:,}")
 print(f"vocab_size: {args.vocab_size:,}")
@@ -48,7 +45,7 @@ def text_iterator():
             if len(doc_text) > args.doc_cap:
                 doc_text = doc_text[:args.doc_cap]
             if args.cobpe:
-                doc_text = apply_space_cap_normalization(doc_text)
+                doc_text = normalize_cobpe_training_text(doc_text)
             nchars += len(doc_text)
             yield doc_text
             if nchars > args.max_chars:
@@ -58,38 +55,14 @@ text_iter = text_iterator()
 # -----------------------------------------------------------------------------
 # Train the tokenizer
 t0 = time.time()
-train_vocab_size = int(args.vocab_size) + vocab_buffer_size
 if args.cobpe:
-    tokenizer = RustBPETokenizer.train_from_iterator_normalized_space_cap(text_iter, train_vocab_size)
+    tokenizer, cobpe_report = train_cobpe_tokenizer(text_iter, args.vocab_size)
+    print(f"Finalized buffered tokenizer to target vocab size: {args.vocab_size:,}")
 else:
-    tokenizer = RustBPETokenizer.train_from_iterator(text_iter, train_vocab_size)
+    tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size)
 t1 = time.time()
 train_time = t1 - t0
 print(f"Training time: {train_time:.2f}s")
-
-buffer_report = {}
-if args.cobpe:
-    redundant = detect_redundant_token_ids(tokenizer)
-    redundant_ids = sorted({
-        *redundant["space_prefixed_with_unspaced_counterpart"],
-        *redundant["capitalized_with_lowercase_counterpart"],
-    })
-    tokenizer, finalize_stats = finalize_tokenizer_vocab(
-        tokenizer,
-        target_vocab_size=int(args.vocab_size),
-        redundant_token_ids=redundant_ids,
-    )
-    buffer_report = {
-        "vocab_size_target": int(args.vocab_size),
-        "vocab_buffer_size": vocab_buffer_size,
-        "trained_vocab_size": int(train_vocab_size),
-        "redundant_counts": {
-            "space_prefixed_with_unspaced_counterpart": len(redundant["space_prefixed_with_unspaced_counterpart"]),
-            "capitalized_with_lowercase_counterpart": len(redundant["capitalized_with_lowercase_counterpart"]),
-        },
-        **finalize_stats,
-    }
-    print(f"Finalized buffered tokenizer to target vocab size: {args.vocab_size:,}")
 
 # -----------------------------------------------------------------------------
 # Save the tokenizer to disk
@@ -97,27 +70,8 @@ base_dir = get_base_dir()
 tokenizer_dir = os.path.join(base_dir, "tokenizer")
 tokenizer.save(tokenizer_dir)
 if args.cobpe:
-    metadata_path = os.path.join(tokenizer_dir, "compositional.json")
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(build_cobpe_metadata(), f, indent=2, sort_keys=True)
+    metadata_path, config_path = save_cobpe_metadata(tokenizer_dir, cobpe_report)
     print(f"Saved CoBPE metadata to {metadata_path}")
-
-    config_path = os.path.join(tokenizer_dir, "cobpe_config.json")
-    config = {
-        "version": 1,
-        "normalized_space_cap": True,
-        "normalization": {
-            "separate_affix_punctuation": True,
-            "case_normalization": "standard_titlecase_to_lower",
-            "split_pattern": "normalized",
-        },
-        "vocab_size_target": int(args.vocab_size),
-        "vocab_buffer_size": vocab_buffer_size,
-        "trained_vocab_size": int(train_vocab_size),
-    }
-    config.update(buffer_report)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, sort_keys=True)
     print(f"Saved CoBPE build config to {config_path}")
 
 # -----------------------------------------------------------------------------

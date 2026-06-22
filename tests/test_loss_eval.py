@@ -3,7 +3,8 @@ import math
 import torch
 
 from nanochat.compositional import CompositionalSpec
-from nanochat.loss_eval import _compositional_target_bytes, evaluate_bpb
+from nanochat.compositional_bpb import compositional_target_bytes
+from nanochat.loss_eval import evaluate_bpb
 
 
 class MockEvalModel:
@@ -174,7 +175,7 @@ def test_compositional_target_bytes_strip_base_space_for_non_default_modifiers()
     y = torch.full((1, len(rows)), tokenizer.base_id, dtype=torch.long)
     y_mods = torch.tensor([rows], dtype=torch.long)
 
-    fast_lengths = _compositional_target_bytes(y, y_mods, token_bytes, tokenizer)
+    fast_lengths = compositional_target_bytes(y, y_mods, token_bytes, tokenizer)
     decoded_lengths = torch.tensor(
         [
             len(tokenizer.decode_token_with_modifiers(tokenizer.base_id, row).encode("utf-8"))
