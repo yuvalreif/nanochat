@@ -133,20 +133,10 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
             pos = 0
             while pos < row_capacity:
                 # Ensure buffer has documents
-                target_buffer_size = 1 if with_modifiers else buffer_size
-                while len(doc_buffer) < target_buffer_size:
+                while len(doc_buffer) < buffer_size:
                     refill_buffer()
 
                 remaining = row_capacity - pos
-                if with_modifiers:
-                    doc = doc_buffer.pop(0)
-                    doc_len = len(doc)
-                    if doc_len == 0:
-                        continue
-                    take = min(doc_len, remaining)
-                    copy_doc_span(row_buffer, row_mod_buffer, row_idx=row_idx, pos=pos, doc=doc, take=take)
-                    pos += take
-                    continue
 
                 # Find largest doc that fits entirely
                 best_idx = -1
