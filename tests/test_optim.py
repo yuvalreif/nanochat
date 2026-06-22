@@ -48,15 +48,11 @@ def test_dist_adamw_reduces_small_params_and_scatters_shardable_params(monkeypat
     assert ("reduce_scatter", (16, 32), (64, 32)) in calls
 
 
-def test_dist_adamw_all_reduces_large_nondivisible_params(monkeypatch):
-    calls = []
-
+def test_dist_adamw_rejects_large_nondivisible_params(monkeypatch):
     def fake_all_reduce(grad, op, async_op):
-        calls.append(("all_reduce", tuple(grad.shape)))
         return _FakeWork()
 
     def fake_reduce_scatter_tensor(output, input, op, async_op):
-        calls.append(("reduce_scatter", tuple(output.shape), tuple(input.shape)))
         return _FakeWork()
 
     monkeypatch.setattr(optim_mod.dist, "all_reduce", fake_all_reduce)
@@ -68,7 +64,9 @@ def test_dist_adamw_all_reduces_large_nondivisible_params(monkeypatch):
         dict(kind="adamw", params=[nondivisible], lr=0.1, betas=(0.8, 0.96), eps=1e-10, weight_decay=0.01)
     ])
 
-    info = optimizer._reduce_adamw(optimizer.param_groups[0], world_size=4)
-
-    assert info["param_infos"][nondivisible]["is_small"]
-    assert calls == [("all_reduce", (61, 32))]
+    try:
+        optimizer._reduce_adamw(optimizer.param_groups[0], world_size=4)
+    except AssertionError as exc:
+        assert "divisible by world_size" in str(exc)
+    else:
+        raise AssertionError("Expected non-shardable AdamW parameter to fail")

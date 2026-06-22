@@ -72,13 +72,16 @@ def test_gpt_rejects_wrong_modifier_group_count():
         raise AssertionError("Expected ValueError for wrong modifier group count")
 
 
-def test_gpt_compositional_keeps_snapshot_modifier_table_shapes():
+def test_gpt_compositional_pads_modifier_tables_for_ddp_sharding():
     model = _build_model(modifier_group_sizes=(31, 30))
     assert model.cobpe.total_size == 61
-    assert model.cobpe.embed.weight.shape == (61, model.config.n_embd)
-    assert model.cobpe.refine_out.weight.shape[0] == 61
+    assert model.cobpe.padded_total_size == 64
+    assert model.cobpe.embed.weight.shape == (64, model.config.n_embd)
+    assert model.cobpe.refine_out.weight.shape[0] == 64
     assert torch.any(model.cobpe.embed.weight[0] != 0)
     assert torch.any(model.cobpe.embed.weight[31] != 0)
+    assert torch.equal(model.cobpe.embed.weight[61:], torch.zeros_like(model.cobpe.embed.weight[61:]))
+    assert torch.equal(model.cobpe.refine_out.weight[61:], torch.zeros_like(model.cobpe.refine_out.weight[61:]))
 
     ids = torch.randint(0, 32, (2, 8), dtype=torch.long)
     modifier_ids = torch.stack(
@@ -93,12 +96,12 @@ def test_gpt_compositional_keeps_snapshot_modifier_table_shapes():
     assert model.cobpe.embed_sum(modifier_ids).shape == (2, 8, model.config.n_embd)
 
 
-def test_cobpe_canonical_modifier_head_keeps_snapshot_fp8_skip_shapes():
+def test_cobpe_canonical_modifier_head_keeps_fp8_skip_shapes_even_when_padded():
     module = CoBPEModule((31, 30), 768, Linear)
     assert module.refine_fc.out_features == 244
-    assert module.refine_out.out_features == 61
+    assert module.refine_out.out_features == 64
     assert module.refine_fc.out_features % 16 != 0
-    assert module.refine_out.out_features % 16 != 0
+    assert min(module.refine_out.in_features, module.refine_out.out_features) < 128
 
 
 def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
