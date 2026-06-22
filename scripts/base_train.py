@@ -130,7 +130,7 @@ user_config["compositional_mode"] = compositional_mode
 user_config["modifier_group_sizes"] = list(modifier_group_sizes)
 if compositional_mode:
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
-    print0(f"Compositional tokenizer backend: {'rust' if getattr(tokenizer, 'rust_backend', None) is not None else 'python'}")
+    print0("Compositional tokenizer backend: rustbpe")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model

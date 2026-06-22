@@ -97,7 +97,16 @@ class MockSpaceStrippingTokenizer:
 
     def decode_token_with_modifiers(self, token_id, modifier_row):
         assert int(token_id) == self.base_id
-        return self.spec.surface_for_token(int(token_id), modifier_row, self._decode_base)
+        surfaces = {
+            (0, 0, 0, 0, 0): " dog",
+            (0, 0, 0, 0, 1): "dog.",
+            (1, 0, 0, 0, 0): " dog",
+            (0, 1, 0, 0, 0): "the dog",
+            (0, 0, 1, 0, 0): "on dog",
+            (0, 0, 0, 1, 0): '"dog',
+            (1, 1, 1, 1, 1): ' "on the dog.',
+        }
+        return surfaces[tuple(int(v) for v in modifier_row)]
 
 
 def test_evaluate_bpb_passes_modifier_batches_and_counts_modified_bytes():
