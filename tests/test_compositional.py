@@ -232,19 +232,16 @@ def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
 
 def test_dataloader_with_modifiers_yields_modifier_batches(monkeypatch):
     class MockTokenizer:
-        def has_compositional_mode(self):
-            return True
-
         def get_bos_token_id(self):
             return 99
 
         def get_num_modifier_groups(self):
             return 1
 
-        def __call__(self, texts, prepend=None, append=None, num_threads=8):
+        def encode_with_modifiers(self, texts, prepend=None, append=None, num_threads=8):
             assert prepend == 99
             return [
-                TokenSequence([99, 10, 11], [[0], [1], [2]])
+                ([99, 10, 11], [[0], [1], [2]])
                 for _ in texts
             ]
 
@@ -278,7 +275,7 @@ def test_dataloader_with_modifiers_requires_tokenizer_support(monkeypatch):
 
     monkeypatch.setattr("nanochat.dataloader._document_batches", fake_document_batches)
 
-    with pytest.raises(ValueError, match="compositional tokenizer"):
+    with pytest.raises(ValueError, match="encode_with_modifiers"):
         loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
             object(),
             B=1,
@@ -289,3 +286,42 @@ def test_dataloader_with_modifiers_requires_tokenizer_support(monkeypatch):
             with_modifiers=True,
         )
         next(loader)
+
+
+def test_dataloader_with_modifiers_keeps_packing_alignment(monkeypatch):
+    class MockTokenizer:
+        def get_bos_token_id(self):
+            return 99
+
+        def get_num_modifier_groups(self):
+            return 1
+
+        def encode_with_modifiers(self, texts, prepend=None, append=None, num_threads=8):
+            assert prepend == 99
+            docs = [
+                ([99, 1, 2], [[0], [1], [2]]),
+                ([99, 3], [[0], [3]]),
+                ([99, 4, 5, 6], [[0], [4], [5], [6]]),
+            ]
+            return docs[:len(texts)]
+
+    def fake_document_batches(split, resume_state_dict, tokenizer_batch_size):
+        while True:
+            yield ["a", "b", "c"], (0, 0, 1)
+
+    monkeypatch.setattr("nanochat.dataloader._document_batches", fake_document_batches)
+
+    loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
+        MockTokenizer(),
+        B=1,
+        T=4,
+        split="train",
+        device="cpu",
+        buffer_size=3,
+        with_modifiers=True,
+    )
+    (inputs, input_mods), (targets, target_mods), _ = next(loader)
+    assert inputs.tolist() == [[99, 4, 5, 6]]
+    assert targets.tolist() == [[4, 5, 6, 99]]
+    assert input_mods.tolist() == [[[0], [4], [5], [6]]]
+    assert target_mods.tolist() == [[[4], [5], [6], [0]]]

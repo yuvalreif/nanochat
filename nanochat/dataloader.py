@@ -142,21 +142,21 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 best_idx = -1
                 best_len = 0
                 for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc)
+                    doc_len = len(doc[0])
                     if doc_len <= remaining and doc_len > best_len:
                         best_idx = i
                         best_len = doc_len
 
                 if best_idx >= 0:
-                    doc = doc_buffer.pop(best_idx)
-                    doc_len = len(doc)
-                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, doc=doc, take=doc_len)
+                    doc_tokens, doc_mods = doc_buffer.pop(best_idx)
+                    doc_len = len(doc_tokens)
+                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=doc_len)
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
-                    doc = doc_buffer.pop(shortest_idx)
-                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, doc=doc, take=remaining)
+                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i][0]))
+                    doc_tokens, doc_mods = doc_buffer.pop(shortest_idx)
+                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=remaining)
                     pos += remaining
 
         # Copy to pinned CPU buffer, then single HtoD transfer
