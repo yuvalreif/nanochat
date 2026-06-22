@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 from nanochat.common import get_dist_info
 from nanochat.cobpe.data import copy_doc_span, encode_doc_batch, resolve_num_modifier_groups
 from nanochat.dataset import list_parquet_files
+from nanochat.token_codec import EncodedBatch
 
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
@@ -142,7 +143,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 best_idx = -1
                 best_len = 0
                 for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc[0]) if with_modifiers else len(doc)
+                    doc_len = len(doc)
                     if doc_len <= remaining and doc_len > best_len:
                         best_idx = i
                         best_len = doc_len
@@ -150,7 +151,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 if best_idx >= 0:
                     doc = doc_buffer.pop(best_idx)
                     if with_modifiers:
-                        doc_tokens, doc_mods = doc
+                        doc_tokens, doc_mods = doc.ids, doc.modifiers
                         doc_len = len(doc_tokens)
                         copy_doc_span(row_buffer, row_mod_buffer, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=doc_len)
                     else:
@@ -159,10 +160,10 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i][0]) if with_modifiers else len(doc_buffer[i]))
+                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
                     doc = doc_buffer.pop(shortest_idx)
                     if with_modifiers:
-                        doc_tokens, doc_mods = doc
+                        doc_tokens, doc_mods = doc.ids, doc.modifiers
                         copy_doc_span(row_buffer, row_mod_buffer, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=remaining)
                     else:
                         row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
@@ -181,7 +182,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)
         if with_modifiers:
             gpu_mod_buffer.copy_(cpu_mod_buffer, non_blocking=use_cuda)
-            yield (inputs, input_mods), (targets, target_mods), state_dict
+            yield EncodedBatch(inputs, input_mods), EncodedBatch(targets, target_mods), state_dict
         else:
             yield inputs, targets, state_dict
 

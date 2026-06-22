@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from nanochat.cobpe.runtime import build_rust_backend
-from nanochat.token_codec import TokenSequenceMixin
+from nanochat.token_codec import EncodedSequenceMixin
 
 
 MULTI_TOKEN_FIRST_GROUPS = {
@@ -271,7 +271,7 @@ class CompositionalSpec:
         return payload
 
 
-class RustCoBPETokenizer(TokenSequenceMixin):
+class RustCoBPETokenizer(EncodedSequenceMixin):
     """Expose CoBPE tokenization while delegating the base vocabulary to rustbpe."""
 
     def __init__(self, base_tokenizer, spec: CompositionalSpec, *, tokenizer_dir: Optional[str] = None):
@@ -337,7 +337,7 @@ class RustCoBPETokenizer(TokenSequenceMixin):
         raise ValueError(f"Invalid input type: {type(text)}")
 
     def __call__(self, text, *args, **kwargs):
-        """Encode text into TokenSequence objects carrying base ids and modifiers."""
+        """Encode text into EncodedSequence objects carrying base ids and modifiers."""
         if isinstance(text, str):
             return self.encode_sequence(text, *args, **kwargs)
         if isinstance(text, list):

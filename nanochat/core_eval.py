@@ -12,7 +12,7 @@ from jinja2 import Template
 import torch
 import torch.distributed as dist
 from nanochat.cobpe.eval import find_changed_token_span, option_mean_loss_with_suffix_boundary_rule
-from nanochat.token_codec import TokenSequence, stack_sequences
+from nanochat.token_codec import EncodedSequence, stack_sequences
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -106,7 +106,7 @@ def find_common_length(token_sequences, direction='left'):
 
 def _token_units(tokens):
     """Return complete token identities, including CoBPE modifiers when present."""
-    return tokens.units() if isinstance(tokens, TokenSequence) else tokens
+    return tokens.units() if isinstance(tokens, EncodedSequence) else tokens
 
 
 def batch_sequences_mc(tokenizer, prompts):
@@ -133,7 +133,7 @@ def batch_sequences_lm(tokenizer, prompts):
     # In LM tasks, we have two prompts: without and with continuation
     tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
     tokens_without, tokens_with = tokens
-    if isinstance(tokens_without, TokenSequence) and tokens_without.modifiers is not None:
+    if isinstance(tokens_without, EncodedSequence) and tokens_without.modifiers is not None:
         # CoBPE can retokenize the word at the continuation boundary, so score the changed span.
         start_idx, end_idx = find_changed_token_span(tokens_without.ids, tokens_with.ids, prompts)
     else:
@@ -244,7 +244,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         for t, s, e in zip(tokens, start_idxs, end_idxs):
             if len(t) > max_tokens:
                 num_to_crop = len(t) - max_tokens
-                new_tokens.append(t.slice(-max_tokens) if isinstance(t, TokenSequence) else t[-max_tokens:]) # take the last max_tokens tokens
+                new_tokens.append(t.slice(-max_tokens) if isinstance(t, EncodedSequence) else t[-max_tokens:]) # take the last max_tokens tokens
                 new_start_idxs.append(s - num_to_crop) # shift the indices down
                 new_end_idxs.append(e - num_to_crop)
                 assert s - num_to_crop >= 0, "this should never happen right?"
@@ -257,7 +257,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
-    default_modifier = tokenizer.get_default_modifier() if any(isinstance(seq, TokenSequence) and seq.modifiers is not None for seq in tokens) else None
+    default_modifier = tokenizer.get_default_modifier() if any(isinstance(seq, EncodedSequence) and seq.modifiers is not None for seq in tokens) else None
     input_ids, input_modifier_ids = stack_sequences(tokens, pad_token_id, default_modifier)
     input_ids = input_ids.to(device)
     if input_modifier_ids is not None:

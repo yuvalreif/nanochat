@@ -11,7 +11,7 @@ import copy
 from functools import lru_cache
 
 from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer
-from nanochat.token_codec import TokenSequenceMixin
+from nanochat.token_codec import EncodedSequenceMixin
 from nanochat.tokenizer_backend import build_backend_tokenizer
 
 SPECIAL_TOKENS = [
@@ -40,7 +40,7 @@ from tokenizers import pre_tokenizers, decoders, Regex
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 
-class HuggingFaceTokenizer(TokenSequenceMixin):
+class HuggingFaceTokenizer(EncodedSequenceMixin):
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
 
     def __init__(self, tokenizer):
@@ -165,7 +165,7 @@ import pickle
 import rustbpe
 import tiktoken
 
-class RustBPETokenizer(TokenSequenceMixin):
+class RustBPETokenizer(EncodedSequenceMixin):
     """Light wrapper around tiktoken (for efficient inference) but train with rustbpe"""
 
     def __init__(self, enc, bos_token):

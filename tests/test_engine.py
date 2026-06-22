@@ -7,7 +7,7 @@ python -m pytest tests/test_engine.py -v
 import torch
 import pytest
 from nanochat.engine import KVCache, Engine
-from nanochat.token_codec import TokenSequence, TokenSequenceMixin
+from nanochat.token_codec import EncodedSequence, EncodedSequenceMixin
 from dataclasses import dataclass
 
 
@@ -73,7 +73,7 @@ class MockCompositionalModel(MockModel):
         ]
 
 
-class ByteTokenizer(TokenSequenceMixin):
+class ByteTokenizer(EncodedSequenceMixin):
     """
     Simple byte-level tokenizer for testing.
     Tokens 0-255 are raw bytes, 256+ are special tokens.
@@ -259,29 +259,29 @@ def test_seed_reproducibility():
         assert r1 == r2 == r3, "Same seed must produce identical output for the same prompt."
 
 
-def test_generate_batch_returns_token_sequences_for_regular_bpe():
+def test_generate_batch_returns_encoded_sequences_for_regular_bpe():
     model = MockModel()
     engine = Engine(model, ByteTokenizer())
     prompt = [261, 72, 101, 108, 108, 111]
 
     results, masks = engine.generate_batch(prompt, temperature=0.0, max_tokens=3, seed=1)
 
-    assert isinstance(results[0], TokenSequence)
+    assert isinstance(results[0], EncodedSequence)
     assert results[0].modifiers is None
     assert list(results[0]) == results[0].ids
     assert len(masks[0]) == len(results[0])
 
 
-def test_regular_bpe_generate_accepts_plain_token_sequence():
+def test_regular_bpe_generate_accepts_plain_encoded_sequence():
     engine = Engine(MockModel(), ByteTokenizer())
-    step, _ = next(engine.generate(TokenSequence([261, 72]), max_tokens=1))
+    step, _ = next(engine.generate(EncodedSequence([261, 72]), max_tokens=1))
     assert len(step) == 1
 
 
 def test_regular_bpe_generate_rejects_modifier_sequence():
     engine = Engine(MockModel(), ByteTokenizer())
-    with pytest.raises(ValueError, match="modifier-bearing TokenSequence"):
-        next(engine.generate(TokenSequence([261, 72], [[0], [0]]), max_tokens=1))
+    with pytest.raises(ValueError, match="modifier-bearing EncodedSequence"):
+        next(engine.generate(EncodedSequence([261, 72], [[0], [0]]), max_tokens=1))
 
 
 def test_compositional_generate_accepts_plain_token_ids_with_default_modifiers():
@@ -292,7 +292,7 @@ def test_compositional_generate_accepts_plain_token_ids_with_default_modifiers()
 
     results, masks = engine.generate_batch(prompt, temperature=0.0, max_tokens=3, seed=1)
 
-    assert isinstance(results[0], TokenSequence)
+    assert isinstance(results[0], EncodedSequence)
     assert results[0].modifiers == [[0] for _ in results[0].ids]
     assert len(masks[0]) == len(results[0])
 

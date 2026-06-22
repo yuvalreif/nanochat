@@ -164,7 +164,7 @@ class RowState:
         self.current_tokens = current_tokens
         self.forced_steps = deque() # Queue of TokenItem objects to force inject
         self.in_python_block = False # Whether we are inside a python block
-        self.python_expr_tokens = None # TokenSequence of the current python expression
+        self.python_expr_tokens = None # EncodedSequence of the current python expression
         self.completed = False # Whether this row has completed generation
 
 class Engine:

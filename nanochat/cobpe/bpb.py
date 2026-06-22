@@ -3,6 +3,8 @@
 import torch
 import torch.nn.functional as F
 
+from nanochat.token_codec import EncodedBatch
+
 
 def target_counted_mask(y, token_bytes):
     valid = y >= 0
@@ -108,6 +110,8 @@ def build_compositional_bpb_tables(tokenizer, token_bytes, *, device):
 
 def unpack_eval_batch(batch):
     x, y = batch
+    if isinstance(x, EncodedBatch) and isinstance(y, EncodedBatch):
+        return x.ids, y.ids, x.modifiers, y.modifiers
     if isinstance(x, tuple) and isinstance(y, tuple):
         x_ids, x_mods = x
         y_ids, y_mods = y

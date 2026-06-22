@@ -536,9 +536,7 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         if compositional_mode:
-            x_ids, x_mods = x
-            y_ids, y_mods = y
-            loss = model(x_ids, y_ids, modifier_ids=x_mods, target_modifier_ids=y_mods)
+            loss = model(x.ids, y.ids, modifier_ids=x.modifiers, target_modifier_ids=y.modifiers)
         else:
             loss = model(x, y)
         train_loss = loss.detach() # for logging

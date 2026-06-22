@@ -2,6 +2,8 @@
 
 import torch
 
+from nanochat.token_codec import EncodedSequence
+
 
 def resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
     """Validate the CoBPE dataloader mode and return its modifier width."""
@@ -29,7 +31,7 @@ def encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with
                     "Compositional tokenizer returned mismatched token/modifier lengths: "
                     f"{len(token_ids)} != {len(modifier_rows)}"
                 )
-            out.append((token_ids, modifier_rows))
+            out.append(EncodedSequence(token_ids, modifier_rows))
         return out
 
     return tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)

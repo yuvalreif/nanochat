@@ -5,7 +5,7 @@ import pytest
 from nanochat.cobpe.runtime import RustCompositionalBackend
 from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.token_codec import TokenItem, TokenSequence, stack_sequences
+from nanochat.token_codec import EncodedBatch, TokenItem, EncodedSequence, stack_sequences
 
 
 def test_build_cobpe_metadata_is_complete_and_json_serializable():
@@ -34,10 +34,23 @@ def test_stack_sequences_handles_plain_and_modifier_sequences():
     assert plain_ids.tolist() == [[1, 2], [3, 0]]
     assert plain_modifiers is None
 
-    sequences = [TokenSequence([1, 2], [[0], [1]]), TokenSequence([3], [[1]])]
+    sequences = [EncodedSequence([1, 2], [[0], [1]]), EncodedSequence([3], [[1]])]
     stacked_ids, modifiers = stack_sequences(sequences, pad_token_id=0, default_modifier=[0])
     assert stacked_ids.tolist() == [[1, 2], [3, 0]]
     assert modifiers.tolist() == [[[0], [1]], [[1], [0]]]
+
+
+def test_encoded_sequence_construction_is_zero_copy():
+    ids = [1, 2]
+    modifiers = [[0], [1]]
+    seq = EncodedSequence(ids, modifiers)
+
+    assert seq.ids is ids
+    assert seq.modifiers is modifiers
+    ids.append(3)
+    modifiers.append([2])
+    assert seq.ids == [1, 2, 3]
+    assert seq.modifiers == [[0], [1], [2]]
 
 
 def test_compositional_spec_to_rust_config_exports_runtime_contract():
@@ -202,12 +215,12 @@ def test_rust_cobpe_tokenizer_delegates_to_rust_backend(monkeypatch):
     batch_seq = tokenizer.encode_sequences(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
     called_seq = tokenizer("ab", prepend=tokenizer.get_bos_token_id())
     called_batch = tokenizer(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
-    assert seq == TokenSequence([99, 12], [[0, 0], [2, 0]])
+    assert seq == EncodedSequence([99, 12], [[0, 0], [2, 0]])
     assert batch_seq == [seq, seq]
     assert called_seq == seq
     assert called_batch == batch_seq
-    assert tokenizer.decode_sequence(TokenSequence([12], [[2, 0]])) == "AB"
-    assert tokenizer.empty_sequence() == TokenSequence([], [])
+    assert tokenizer.decode_sequence(EncodedSequence([12], [[2, 0]])) == "AB"
+    assert tokenizer.empty_sequence() == EncodedSequence([], [])
     assert tokenizer.token_item(99) == TokenItem(99, [0, 0])
 
 
@@ -279,7 +292,11 @@ def test_dataloader_with_modifiers_yields_modifier_batches(monkeypatch):
         buffer_size=1,
         with_modifiers=True,
     )
-    (inputs, input_mods), (targets, target_mods), state = next(loader)
+    batch_inputs, batch_targets, state = next(loader)
+    assert isinstance(batch_inputs, EncodedBatch)
+    assert isinstance(batch_targets, EncodedBatch)
+    inputs, input_mods = batch_inputs
+    targets, target_mods = batch_targets
     assert inputs.tolist() == [[99, 10]]
     assert targets.tolist() == [[10, 11]]
     assert input_mods.tolist() == [[[0], [1]]]
