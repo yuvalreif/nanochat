@@ -326,10 +326,11 @@ class DistMuonAdamW(torch.optim.Optimizer):
     AdamW Communication (ZeRO-2 style):
     - Small params (<1024 elements): all_reduce gradients, update full param on each rank.
       Optimizer state is replicated but these params are tiny (scalars, biases).
-    - Large params: reduce_scatter gradients so each rank gets 1/N of the grad, update
-      only that slice, then all_gather the updated slices. Optimizer state (exp_avg,
-      exp_avg_sq) is sharded - each rank only stores state for its slice.
-      Requires param.shape[0] divisible by world_size.
+    - Large shardable params: reduce_scatter gradients so each rank gets 1/N of the grad,
+      update only that slice, then all_gather the updated slices. Optimizer state
+      (exp_avg, exp_avg_sq) is sharded - each rank only stores state for its slice.
+    - Large params with param.shape[0] not divisible by world_size use all_reduce,
+      because reduce_scatter cannot evenly shard them.
 
     Muon Communication (stacked + chunked):
     - All params in a Muon group must have the same shape (caller's responsibility).
@@ -373,13 +374,15 @@ class DistMuonAdamW(torch.optim.Optimizer):
         param_infos = {}
         for p in group['params']:
             grad = p.grad
-            if p.numel() < 1024:
-                # Small params: all_reduce (no scatter/gather needed)
+            if grad is None:
+                continue
+            use_all_reduce = p.numel() < 1024 or grad.ndim == 0 or grad.shape[0] % world_size != 0
+            if use_all_reduce:
+                # Small or non-shardable params: all_reduce (no scatter/gather needed)
                 future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
                 param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
             else:
                 # Large params: reduce_scatter
-                assert grad.shape[0] % world_size == 0, f"AdamW reduce_scatter requires shape[0] ({grad.shape[0]}) divisible by world_size ({world_size})"
                 rank_size = grad.shape[0] // world_size
                 grad_slice = torch.empty_like(grad[:rank_size])
                 future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
@@ -411,6 +414,8 @@ class DistMuonAdamW(torch.optim.Optimizer):
         """Wait for reduce, compute AdamW updates, launch gathers for large params."""
         param_infos = info['param_infos']
         for p in group['params']:
+            if p not in param_infos:
+                continue
             pinfo = param_infos[p]
             pinfo['future'].wait()
             grad_slice = pinfo['grad_slice']
