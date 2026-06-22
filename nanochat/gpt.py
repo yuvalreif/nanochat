@@ -185,13 +185,12 @@ class GPT(nn.Module):
             offset += group_size
         self.modifier_group_offsets = tuple(modifier_offsets)
         self.modifier_embed = nn.Embedding(self.total_modifier_size, config.n_embd) if self.total_modifier_size > 0 else None
-        self.modifier_head = Linear(config.n_embd, self.total_modifier_size, bias=False) if self.total_modifier_size > 0 else None
-        self.modifier_base_proj = None
-        self.modifier_gate = None
+        self.modifier_logit_refine_fc = None
+        self.modifier_logit_refine_out = None
         if self.total_modifier_size > 0:
-            # z = W_h h + g(h) * W_b b, where b comes from unembedding rows.
-            self.modifier_base_proj = Linear(config.n_embd, self.total_modifier_size, bias=False)
-            self.modifier_gate = Linear(config.n_embd, 1, bias=False)
+            refine_dim = self._modifier_refine_dim()
+            self.modifier_logit_refine_fc = Linear(2 * config.n_embd, refine_dim, bias=False)
+            self.modifier_logit_refine_out = Linear(refine_dim, self.total_modifier_size, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
         # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
@@ -238,13 +237,10 @@ class GPT(nn.Module):
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
         if self.modifier_embed is not None:
             torch.nn.init.normal_(self.modifier_embed.weight, mean=0.0, std=0.8)
-        if self.modifier_head is not None:
-            torch.nn.init.normal_(self.modifier_head.weight, mean=0.0, std=0.001)
-        if self.modifier_base_proj is not None:
-            torch.nn.init.normal_(self.modifier_base_proj.weight, mean=0.0, std=0.001)
-        if self.modifier_gate is not None:
-            # no bias term; zero init => g = sigmoid(0) = 0.5 at init.
-            torch.nn.init.zeros_(self.modifier_gate.weight)
+        if self.modifier_logit_refine_fc is not None:
+            torch.nn.init.normal_(self.modifier_logit_refine_fc.weight, mean=0.0, std=0.001)
+        if self.modifier_logit_refine_out is not None:
+            torch.nn.init.normal_(self.modifier_logit_refine_out.weight, mean=0.0, std=0.001)
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
         n_embd = self.config.n_embd
@@ -341,6 +337,9 @@ class GPT(nn.Module):
         window_sizes[-1] = (long_window, 0)
         return window_sizes
 
+    def _modifier_refine_dim(self):
+        return min(self.config.n_embd, max(32, 4 * self.total_modifier_size))
+
     def get_device(self):
         return self.transformer.wte.weight.device
 
@@ -388,22 +387,20 @@ class GPT(nn.Module):
         # Count each group separately (mirrors the grouping in setup_optimizers)
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         modifier_embeds = 0 if self.modifier_embed is None else sum(p.numel() for p in self.modifier_embed.parameters())
-        modifier_heads = 0 if self.modifier_head is None else sum(p.numel() for p in self.modifier_head.parameters())
         modifier_conditioners = 0
-        if self.modifier_base_proj is not None:
-            modifier_conditioners += sum(p.numel() for p in self.modifier_base_proj.parameters())
-        if self.modifier_gate is not None:
-            modifier_conditioners += sum(p.numel() for p in self.modifier_gate.parameters())
+        if self.modifier_logit_refine_fc is not None:
+            modifier_conditioners += sum(p.numel() for p in self.modifier_logit_refine_fc.parameters())
+        if self.modifier_logit_refine_out is not None:
+            modifier_conditioners += sum(p.numel() for p in self.modifier_logit_refine_out.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
-        total = wte + modifier_embeds + modifier_heads + modifier_conditioners + value_embeds + lm_head + transformer_matrices + scalars
+        total = wte + modifier_embeds + modifier_conditioners + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
         return {
             'wte': wte,
             'modifier_embeds': modifier_embeds,
-            'modifier_heads': modifier_heads,
             'modifier_conditioners': modifier_conditioners,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
@@ -423,12 +420,10 @@ class GPT(nn.Module):
         lm_head_params = list(self.lm_head.parameters())
         if self.modifier_embed is not None:
             lm_head_params += list(self.modifier_embed.parameters())
-        if self.modifier_head is not None:
-            lm_head_params += list(self.modifier_head.parameters())
-        if self.modifier_base_proj is not None:
-            lm_head_params += list(self.modifier_base_proj.parameters())
-        if self.modifier_gate is not None:
-            lm_head_params += list(self.modifier_gate.parameters())
+        if self.modifier_logit_refine_fc is not None:
+            lm_head_params += list(self.modifier_logit_refine_fc.parameters())
+        if self.modifier_logit_refine_out is not None:
+            lm_head_params += list(self.modifier_logit_refine_out.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
@@ -551,12 +546,8 @@ class GPT(nn.Module):
         base_rep = F.embedding(token_flat, self.lm_head.weight)
         if base_rep.dtype != x_flat.dtype:
             base_rep = base_rep.to(dtype=x_flat.dtype)
-        hidden_logits = self.modifier_head(norm(x_flat))
-        base_logits = self.modifier_base_proj(norm(base_rep))
-        gate = torch.sigmoid(self.modifier_gate(x_flat))
-        if gate.dtype != base_logits.dtype:
-            gate = gate.to(dtype=base_logits.dtype)
-        all_logits = hidden_logits + gate * base_logits
+        refine_in = torch.cat([norm(x_flat), norm(base_rep)], dim=-1)
+        all_logits = self.modifier_logit_refine_out(F.silu(self.modifier_logit_refine_fc(refine_in)))
         outputs = []
         for group_idx, group_size in enumerate(self.modifier_group_sizes):
             start = self.modifier_group_offsets[group_idx]

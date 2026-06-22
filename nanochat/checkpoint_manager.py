@@ -22,10 +22,16 @@ def log0(message):
 
 def _patch_missing_config_keys(model_config_kwargs):
     """Add default values for new config keys missing in old checkpoints."""
-    model_config_kwargs.pop("modifier_group_reduction", None)
-    model_config_kwargs.pop("modifier_conditioning_mode", None)
-    model_config_kwargs.pop("use_smear", None)
-    model_config_kwargs.pop("use_backout", None)
+    # Drop obsolete experimental CoBPE config knobs. The PR path is fixed:
+    # modifier embeddings are summed, conditioning is base_hidden_mlp, and
+    # smear/backout are always enabled as in the base nanochat model.
+    for key in (
+        "modifier_group_reduction",
+        "modifier_conditioning_mode",
+        "use_smear",
+        "use_backout",
+    ):
+        model_config_kwargs.pop(key, None)
     # Old models were trained with full context (no sliding window)
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"

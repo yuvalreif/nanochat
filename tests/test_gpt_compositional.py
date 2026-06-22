@@ -91,9 +91,8 @@ def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
 
     modifier_params = [
         model.modifier_embed.weight,
-        model.modifier_head.weight,
-        model.modifier_base_proj.weight,
-        model.modifier_gate.weight,
+        model.modifier_logit_refine_fc.weight,
+        model.modifier_logit_refine_out.weight,
     ]
     for param in modifier_params:
         group = group_for(param)
