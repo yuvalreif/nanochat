@@ -192,6 +192,6 @@ def compositional_joint_nll_sum_groups(model, x, y, x_mods, y_mods):
     for group_idx, group_logits in enumerate(modifier_logits):
         group_targets = y_mods[..., group_idx].long()
         group_targets = torch.where(valid_targets, group_targets, torch.full_like(group_targets, -1))
-        group_loss = F.cross_entropy(group_logits.float().view(batch_size * seq_len, -1), group_targets.reshape(batch_size * seq_len), ignore_index=-1, reduction="none").view(batch_size, seq_len)
+        group_loss = F.cross_entropy(group_logits.view(batch_size * seq_len, -1), group_targets.reshape(batch_size * seq_len), ignore_index=-1, reduction="none").view(batch_size, seq_len)
         modifier_loss_sum = modifier_loss_sum + group_loss
     return base_loss + modifier_loss_sum

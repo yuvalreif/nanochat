@@ -271,6 +271,49 @@ def test_dataloader_with_modifiers_yields_modifier_batches(monkeypatch):
     assert state == {"pq_idx": 0, "rg_idx": 0, "epoch": 1}
 
 
+def test_dataloader_with_modifiers_uses_sequential_packing(monkeypatch):
+    class MockTokenizer:
+        def has_compositional_mode(self):
+            return True
+
+        def get_bos_token_id(self):
+            return 99
+
+        def get_num_modifier_groups(self):
+            return 1
+
+        def __call__(self, texts, prepend=None, append=None, num_threads=8):
+            assert prepend == 99
+            lookup = {
+                "long": TokenSequence([99, 1, 2, 3], [[0], [1], [2], [3]]),
+                "fit": TokenSequence([99, 4, 5], [[0], [4], [5]]),
+            }
+            return [lookup[text] for text in texts]
+
+    def fake_document_batches(split, resume_state_dict, tokenizer_batch_size):
+        while True:
+            yield ["long", "fit"], (0, 0, 1)
+
+    monkeypatch.setattr("nanochat.dataloader._document_batches", fake_document_batches)
+
+    loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
+        MockTokenizer(),
+        B=1,
+        T=2,
+        split="train",
+        device="cpu",
+        tokenizer_batch_size=2,
+        buffer_size=2,
+        with_modifiers=True,
+    )
+    (inputs, input_mods), (targets, target_mods), state = next(loader)
+    assert inputs.tolist() == [[99, 1]]
+    assert targets.tolist() == [[1, 2]]
+    assert input_mods.tolist() == [[[0], [1]]]
+    assert target_mods.tolist() == [[[1], [2]]]
+    assert state == {"pq_idx": 0, "rg_idx": 0, "epoch": 1}
+
+
 def test_dataloader_with_modifiers_requires_tokenizer_support(monkeypatch):
     def fake_document_batches(split, resume_state_dict, tokenizer_batch_size):
         while True:
