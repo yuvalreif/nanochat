@@ -4,7 +4,7 @@ import pytest
 
 from nanochat.compositional import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.token_codec import TokenPiece, TokenSequence
+from nanochat.token_codec import TokenItem, TokenSequence
 
 
 def test_build_cobpe_metadata_is_complete_and_json_serializable():
@@ -174,7 +174,7 @@ def test_rust_cobpe_tokenizer_delegates_to_rust_backend(monkeypatch):
     assert batch_seq == [seq, seq]
     assert tokenizer.decode_sequence(TokenSequence([12], [[2, 0]])) == "AB"
     assert tokenizer.empty_sequence() == TokenSequence([], [])
-    assert tokenizer.token_piece(99) == TokenPiece(99, [0, 0])
+    assert tokenizer.token_item(99) == TokenItem(99, [0, 0])
 
 
 def test_rust_cobpe_tokenizer_requires_rust_backend():

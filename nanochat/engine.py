@@ -162,7 +162,7 @@ class RowState:
     # Per-row state tracking during generation
     def __init__(self, current_tokens):
         self.current_tokens = current_tokens
-        self.forced_steps = deque() # Queue of TokenPiece items to force inject
+        self.forced_steps = deque() # Queue of TokenItem objects to force inject
         self.in_python_block = False # Whether we are inside a python block
         self.python_expr_tokens = None # TokenSequence of the current python expression
         self.completed = False # Whether this row has completed generation
@@ -280,35 +280,35 @@ class Engine:
                 is_forced = len(state.forced_steps) > 0 # are there tokens waiting to be forced in deque?
                 token_masks.append(0 if is_forced else 1) # mask is 0 if forced, 1 if sampled
                 if is_forced:
-                    next_piece = state.forced_steps.popleft()
+                    next_item = state.forced_steps.popleft()
                 else:
-                    next_piece = self.tokenizer.token_piece(
+                    next_item = self.tokenizer.token_item(
                         sampled_tokens[i],
                         None if sampled_modifier_rows is None else sampled_modifier_rows[i],
                     )
-                step.append(next_piece.id, next_piece.modifier)
+                step.append(next_item.id, next_item.modifier)
                 # Update the state of this row to include the next token
-                state.current_tokens.append_piece(next_piece)
+                state.current_tokens.append_item(next_item)
                 # On <|assistant_end|> or <|bos|>, mark the row as completed
-                if next_piece.id == assistant_end or next_piece.id == bos:
+                if next_item.id == assistant_end or next_item.id == bos:
                     state.completed = True
                 # Handle tool logic
-                if next_piece.id == python_start:
+                if next_item.id == python_start:
                     state.in_python_block = True
                     state.python_expr_tokens = self.tokenizer.empty_sequence()
-                elif next_piece.id == python_end and state.in_python_block:
+                elif next_item.id == python_end and state.in_python_block:
                     state.in_python_block = False
                     if state.python_expr_tokens is not None and len(state.python_expr_tokens) > 0:
                         expr = self.tokenizer.decode_sequence(state.python_expr_tokens)
                         result = use_calculator(expr)
                         if result is not None:
                             result_tokens = self.tokenizer.encode_sequence(str(result))
-                            state.forced_steps.append(self.tokenizer.token_piece(output_start))
-                            state.forced_steps.extend(result_tokens.pieces())
-                            state.forced_steps.append(self.tokenizer.token_piece(output_end))
+                            state.forced_steps.append(self.tokenizer.token_item(output_start))
+                            state.forced_steps.extend(result_tokens.token_items())
+                            state.forced_steps.append(self.tokenizer.token_item(output_end))
                     state.python_expr_tokens = self.tokenizer.empty_sequence()
                 elif state.in_python_block:
-                    state.python_expr_tokens.append_piece(next_piece)
+                    state.python_expr_tokens.append_item(next_item)
 
             # Yield the next generated step across all samples.
             yield step, token_masks
@@ -346,7 +346,7 @@ class Engine:
                     if token == assistant_end or token == bos:
                         completed[i] = True
                     else:
-                        results[i].append_piece(step.piece_at(i))
+                        results[i].append_item(step.item_at(i))
                         masks[i].append(mask)
             # Stop if all rows are completed
             if all(completed):

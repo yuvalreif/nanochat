@@ -280,14 +280,14 @@ async def generate_stream(
         top_k=top_k,
         seed=random.randint(0, 2**31 - 1)
     ):
-        piece = step.piece_at(0)
+        item = step.item_at(0)
 
         # Stopping criteria
-        if piece.id == assistant_end or piece.id == bos:
+        if item.id == assistant_end or item.id == bos:
             break
 
         # Append the token to sequence
-        accumulated_tokens.append_piece(piece)
+        accumulated_tokens.append_item(item)
         # Decode all accumulated tokens to get proper UTF-8 handling
         # Note that decode is a quite efficient operation, basically table lookup and string concat
         current_text = worker.tokenizer.decode_sequence(accumulated_tokens)
@@ -328,18 +328,18 @@ async def chat_completions(request: ChatRequest):
         assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
 
         conversation_tokens = worker.tokenizer.empty_sequence()
-        conversation_tokens.append_piece(worker.tokenizer.token_piece(bos))
+        conversation_tokens.append_item(worker.tokenizer.token_item(bos))
         for message in request.messages:
             if message.role == "user":
-                conversation_tokens.append_piece(worker.tokenizer.token_piece(user_start))
+                conversation_tokens.append_item(worker.tokenizer.token_item(user_start))
                 conversation_tokens.extend(worker.tokenizer.encode_sequence(message.content))
-                conversation_tokens.append_piece(worker.tokenizer.token_piece(user_end))
+                conversation_tokens.append_item(worker.tokenizer.token_item(user_end))
             elif message.role == "assistant":
-                conversation_tokens.append_piece(worker.tokenizer.token_piece(assistant_start))
+                conversation_tokens.append_item(worker.tokenizer.token_item(assistant_start))
                 conversation_tokens.extend(worker.tokenizer.encode_sequence(message.content))
-                conversation_tokens.append_piece(worker.tokenizer.token_piece(assistant_end))
+                conversation_tokens.append_item(worker.tokenizer.token_item(assistant_end))
 
-        conversation_tokens.append_piece(worker.tokenizer.token_piece(assistant_start))
+        conversation_tokens.append_item(worker.tokenizer.token_item(assistant_start))
 
         # Streaming response with worker release after completion
         response_tokens = []

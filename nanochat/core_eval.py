@@ -143,6 +143,17 @@ def find_changed_token_span(tokens_without, tokens_with, prompts):
             f"prompt_without[{_format_prompt_debug(prompts[0])}] "
             f"prompt_with[{_format_prompt_debug(prompts[1])}]"
         )
+    assert tokens_without[:start_idx] == tokens_with[:start_idx]
+    if suffix_len > 0:
+        assert tokens_without[-suffix_len:] == tokens_with[-suffix_len:]
+    return start_idx, end_idx
+
+
+def find_strict_prefix_span(tokens_without, tokens_with):
+    start_idx = len(tokens_without)
+    end_idx = len(tokens_with)
+    assert start_idx < end_idx, "prompt without is supposed to be a prefix of prompt with"
+    assert tokens_without == tokens_with[:start_idx], "prompt without is supposed to be a prefix of prompt with"
     return start_idx, end_idx
 
 
@@ -170,13 +181,16 @@ def batch_sequences_lm(tokenizer, prompts):
     # In LM tasks, we have two prompts: without and with continuation
     tokens = _encode_prompts(tokenizer, prompts)
     tokens_without, tokens_with = tokens
-    start_idx, end_idx = find_changed_token_span(tokens_without.ids, tokens_with.ids, prompts)
+    if tokens_without.modifiers is None and tokens_with.modifiers is None:
+        start_idx, end_idx = find_strict_prefix_span(tokens_without.ids, tokens_with.ids)
+    else:
+        start_idx, end_idx = find_changed_token_span(tokens_without.ids, tokens_with.ids, prompts)
     # we only need the with continuation prompt in the LM task, i.e. batch size of 1
     return [tokens_with], [start_idx], [end_idx]
 
 
 @dataclass
-class EvalForwardResult:
+class EvalForwardOutput:
     losses: torch.Tensor
     predictions: torch.Tensor
     modifier_predictions: torch.Tensor | None
@@ -232,20 +246,13 @@ def forward_model(model, input_ids, modifier_ids=None):
     if modifier_ids is not None:
         target_modifier_ids = torch.roll(modifier_ids, shifts=-1, dims=1)
         safe_target_ids = target_ids.clone()
-        modifier_loss, modifier_group_losses = _modifier_losses(
-            model,
-            hidden,
-            safe_target_ids,
-            target_modifier_ids,
-            batch_size,
-            seq_len,
-        )
+        modifier_loss, modifier_group_losses = _modifier_losses(model, hidden, safe_target_ids, target_modifier_ids, batch_size, seq_len)
         losses = losses + modifier_loss
     # Set the last column to be nan because there is no autoregressive loss there
     losses[:, -1] = float('nan')
     # Get the argmax predictions at each position
     predictions = outputs.argmax(dim=-1)
-    return EvalForwardResult(
+    return EvalForwardOutput(
         losses=losses,
         predictions=predictions,
         modifier_predictions=modifier_predictions,

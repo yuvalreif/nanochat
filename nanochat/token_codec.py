@@ -32,14 +32,14 @@ def normalize_token_sequence(tokenizer, tokens) -> "TokenSequence":
     return seq
 
 
-def token_piece_for_tokenizer(tokenizer, token_id: int, modifier: Sequence[int] | None = None) -> "TokenPiece":
+def token_item_for_tokenizer(tokenizer, token_id: int, modifier: Sequence[int] | None = None) -> "TokenItem":
     if tokenizer_has_modifiers(tokenizer):
         if modifier is None:
             modifier = tokenizer.get_default_modifier()
-        return TokenPiece(int(token_id), [int(v) for v in modifier])
+        return TokenItem(int(token_id), [int(v) for v in modifier])
     if modifier is not None:
-        raise ValueError("modifier-bearing TokenPiece requires a compositional tokenizer")
-    return TokenPiece(int(token_id))
+        raise ValueError("modifier-bearing TokenItem requires a compositional tokenizer")
+    return TokenItem(int(token_id))
 
 
 def empty_token_sequence_for_tokenizer(tokenizer) -> "TokenSequence":
@@ -89,8 +89,8 @@ class TokenSequenceMixin:
     def normalize_sequence(self, tokens) -> "TokenSequence":
         return normalize_token_sequence(self, tokens)
 
-    def token_piece(self, token_id: int, modifier: Sequence[int] | None = None) -> "TokenPiece":
-        return token_piece_for_tokenizer(self, token_id, modifier)
+    def token_item(self, token_id: int, modifier: Sequence[int] | None = None) -> "TokenItem":
+        return token_item_for_tokenizer(self, token_id, modifier)
 
     def empty_sequence(self) -> "TokenSequence":
         return empty_token_sequence_for_tokenizer(self)
@@ -106,7 +106,7 @@ class TokenSequenceMixin:
 
 
 @dataclass(frozen=True)
-class TokenPiece:
+class TokenItem:
     id: int
     modifier: list[int] | None = None
 
@@ -159,12 +159,12 @@ class TokenSequence:
             None if self.modifiers is None else self.modifiers[slice(start, stop)],
         )
 
-    def append_piece(self, piece: TokenPiece) -> None:
-        self.ids.append(int(piece.id))
+    def append_item(self, item: TokenItem) -> None:
+        self.ids.append(int(item.id))
         if self.modifiers is not None:
-            if piece.modifier is None:
+            if item.modifier is None:
                 raise ValueError("modifier is required for this token sequence")
-            self.modifiers.append([int(v) for v in piece.modifier])
+            self.modifiers.append([int(v) for v in item.modifier])
 
     def extend(self, other: "TokenSequence") -> None:
         if self.modifiers is None and other.modifiers is not None:
@@ -175,11 +175,11 @@ class TokenSequence:
         if self.modifiers is not None:
             self.modifiers.extend([list(row) for row in other.modifiers])
 
-    def pieces(self) -> list[TokenPiece]:
+    def token_items(self) -> list[TokenItem]:
         if self.modifiers is None:
-            return [TokenPiece(token_id) for token_id in self.ids]
+            return [TokenItem(token_id) for token_id in self.ids]
         return [
-            TokenPiece(token_id, list(modifier))
+            TokenItem(token_id, list(modifier))
             for token_id, modifier in zip(self.ids, self.modifiers)
         ]
 
@@ -215,9 +215,9 @@ class TokenStep:
                 raise ValueError("modifier is required for this token step")
             self.modifiers.append([int(v) for v in modifier])
 
-    def piece_at(self, idx: int) -> TokenPiece:
+    def item_at(self, idx: int) -> TokenItem:
         modifier = None if self.modifiers is None else list(self.modifiers[idx])
-        return TokenPiece(self.ids[idx], modifier)
+        return TokenItem(self.ids[idx], modifier)
 
 
 class TokenCodec:
@@ -250,10 +250,10 @@ class TokenCodec:
             return self.tokenizer.decode_sequence(sequence)
         return decode_token_sequence(self.tokenizer, sequence)
 
-    def piece(self, token_id: int, modifier: Sequence[int] | None = None) -> TokenPiece:
-        if hasattr(self.tokenizer, "token_piece"):
-            return self.tokenizer.token_piece(token_id, modifier)
-        return token_piece_for_tokenizer(self.tokenizer, token_id, modifier)
+    def item(self, token_id: int, modifier: Sequence[int] | None = None) -> TokenItem:
+        if hasattr(self.tokenizer, "token_item"):
+            return self.tokenizer.token_item(token_id, modifier)
+        return token_item_for_tokenizer(self.tokenizer, token_id, modifier)
 
     def empty_sequence(self) -> TokenSequence:
         if hasattr(self.tokenizer, "empty_sequence"):
