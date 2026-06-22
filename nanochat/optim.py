@@ -407,7 +407,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
             grad = p.grad
             if grad is None:
                 continue
-            use_all_reduce = p.numel() < 1024 or grad.ndim == 0
+            use_all_reduce = p.numel() < 1024 or grad.ndim == 0 or grad.shape[0] % world_size != 0
             if use_all_reduce:
                 # Small params: all_reduce (no scatter/gather needed)
                 future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
