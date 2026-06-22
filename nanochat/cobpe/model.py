@@ -9,6 +9,10 @@ def _norm(x):
     return F.rms_norm(x, (x.size(-1),))
 
 
+def _round_up(value, multiple):
+    return ((value + multiple - 1) // multiple) * multiple
+
+
 class CoBPEModule(nn.Module):
     """
     Add modifier embeddings to base-token inputs and predict modifier values.
@@ -18,11 +22,12 @@ class CoBPEModule(nn.Module):
     independently for each modifier group.
     """
 
-    def __init__(self, group_sizes, n_embd, linear_cls):
+    def __init__(self, group_sizes, n_embd, linear_cls, pad_total_size_to=64):
         super().__init__()
         self.group_sizes = tuple(int(size) for size in group_sizes)
         self.num_groups = len(self.group_sizes)
         self.total_size = sum(self.group_sizes)
+        self.padded_total_size = _round_up(max(1, self.total_size), pad_total_size_to)
         offsets = []
         offset = 0
         for group_size in self.group_sizes:
@@ -30,9 +35,9 @@ class CoBPEModule(nn.Module):
             offset += group_size
         self.group_offsets = tuple(offsets)
         refine_dim = min(n_embd, max(32, 4 * self.total_size))
-        self.embed = nn.Embedding(self.total_size, n_embd)
+        self.embed = nn.Embedding(self.padded_total_size, n_embd)
         self.refine_fc = linear_cls(2 * n_embd, refine_dim, bias=False)
-        self.refine_out = linear_cls(refine_dim, self.total_size, bias=False)
+        self.refine_out = linear_cls(refine_dim, self.padded_total_size, bias=False)
 
     @torch.no_grad()
     def init_weights(self):

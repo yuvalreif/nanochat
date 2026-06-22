@@ -71,6 +71,26 @@ def test_gpt_rejects_wrong_modifier_group_count():
         raise AssertionError("Expected ValueError for wrong modifier group count")
 
 
+def test_gpt_compositional_pads_modifier_tables_for_ddp_sharding():
+    model = _build_model(modifier_group_sizes=(31, 30))
+    assert model.cobpe.total_size == 61
+    assert model.cobpe.padded_total_size == 64
+    assert model.cobpe.embed.weight.shape == (64, model.config.n_embd)
+    assert model.cobpe.refine_out.weight.shape[0] == 64
+
+    ids = torch.randint(0, 32, (2, 8), dtype=torch.long)
+    modifier_ids = torch.stack(
+        [
+            torch.randint(0, 31, (2, 8), dtype=torch.long),
+            torch.randint(0, 30, (2, 8), dtype=torch.long),
+        ],
+        dim=-1,
+    )
+    logits = model.get_modifier_logits(torch.randn(2, 8, model.config.n_embd), ids)
+    assert [group_logits.shape for group_logits in logits] == [(2, 8, 31), (2, 8, 30)]
+    assert model.cobpe.embed_sum(modifier_ids).shape == (2, 8, model.config.n_embd)
+
+
 def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
     model = _build_model(modifier_group_sizes=(3, 4))
     unembedding_lr = 0.004
