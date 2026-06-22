@@ -47,7 +47,6 @@ from dataclasses import dataclass
 from nanochat.common import compute_init, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
-from nanochat.token_codec import TokenCodec
 
 # Abuse prevention limits
 MAX_MESSAGES_PER_REQUEST = 500
@@ -91,7 +90,6 @@ class Worker:
     device: torch.device
     engine: Engine
     tokenizer: object
-    token_codec: TokenCodec
 
 class WorkerPool:
     """Pool of workers, each with a model replica on a different GPU."""
@@ -128,7 +126,6 @@ class WorkerPool:
                 device=device,
                 engine=engine,
                 tokenizer=tokenizer,
-                token_codec=TokenCodec(tokenizer),
             )
             self.workers.append(worker)
             await self.available_workers.put(worker)
@@ -271,7 +268,7 @@ async def generate_stream(
     bos = worker.tokenizer.get_bos_token_id()
 
     # Accumulate tokens to properly handle multi-byte UTF-8 characters (like emojis)
-    accumulated_tokens = worker.token_codec.empty_sequence()
+    accumulated_tokens = worker.tokenizer.empty_sequence()
     # Track the last complete UTF-8 string (without replacement characters)
     last_clean_text = ""
 
@@ -293,7 +290,7 @@ async def generate_stream(
         accumulated_tokens.append_piece(piece)
         # Decode all accumulated tokens to get proper UTF-8 handling
         # Note that decode is a quite efficient operation, basically table lookup and string concat
-        current_text = worker.token_codec.decode(accumulated_tokens)
+        current_text = worker.tokenizer.decode_sequence(accumulated_tokens)
         # Only emit text if it doesn't end with a replacement character
         # This ensures we don't emit incomplete UTF-8 sequences
         if not current_text.endswith('�'):
@@ -330,19 +327,19 @@ async def chat_completions(request: ChatRequest):
         assistant_start = worker.tokenizer.encode_special("<|assistant_start|>")
         assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
 
-        conversation_tokens = worker.token_codec.empty_sequence()
-        conversation_tokens.append_piece(worker.token_codec.piece(bos))
+        conversation_tokens = worker.tokenizer.empty_sequence()
+        conversation_tokens.append_piece(worker.tokenizer.token_piece(bos))
         for message in request.messages:
             if message.role == "user":
-                conversation_tokens.append_piece(worker.token_codec.piece(user_start))
-                conversation_tokens.extend(worker.token_codec.encode_text(message.content))
-                conversation_tokens.append_piece(worker.token_codec.piece(user_end))
+                conversation_tokens.append_piece(worker.tokenizer.token_piece(user_start))
+                conversation_tokens.extend(worker.tokenizer.encode_sequence(message.content))
+                conversation_tokens.append_piece(worker.tokenizer.token_piece(user_end))
             elif message.role == "assistant":
-                conversation_tokens.append_piece(worker.token_codec.piece(assistant_start))
-                conversation_tokens.extend(worker.token_codec.encode_text(message.content))
-                conversation_tokens.append_piece(worker.token_codec.piece(assistant_end))
+                conversation_tokens.append_piece(worker.tokenizer.token_piece(assistant_start))
+                conversation_tokens.extend(worker.tokenizer.encode_sequence(message.content))
+                conversation_tokens.append_piece(worker.tokenizer.token_piece(assistant_end))
 
-        conversation_tokens.append_piece(worker.token_codec.piece(assistant_start))
+        conversation_tokens.append_piece(worker.tokenizer.token_piece(assistant_start))
 
         # Streaming response with worker release after completion
         response_tokens = []

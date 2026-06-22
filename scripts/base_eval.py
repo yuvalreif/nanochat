@@ -38,7 +38,6 @@ from nanochat.core_eval import evaluate_task
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
-from nanochat.token_codec import TokenCodec
 
 # -----------------------------------------------------------------------------
 # HuggingFace loading utilities
@@ -242,21 +241,20 @@ def main():
                 "If 5*x + 3 = 13, then x is",
             ]
             engine = Engine(model, tokenizer)
-            token_codec = TokenCodec(tokenizer)
             print0("\nConditioned samples:")
             for prompt in prompts:
-                tokens = token_codec.encode_text(prompt, prepend="<|bos|>")
+                tokens = tokenizer.encode_sequence(prompt, prepend="<|bos|>")
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-                sample_str = token_codec.decode(sample[0])
+                sample_str = tokenizer.decode_sequence(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
                 samples.append(sample_str)
 
             print0("\nUnconditioned samples:")
-            tokens = token_codec.encode_text("", prepend="<|bos|>")
+            tokens = tokenizer.encode_sequence("", prepend="<|bos|>")
             uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
             for sample in uncond:
-                sample_str = token_codec.decode(sample)
+                sample_str = tokenizer.decode_sequence(sample)
                 print0("-" * 80)
                 print0(sample_str)
                 unconditioned_samples.append(sample_str)

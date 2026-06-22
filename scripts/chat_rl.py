@@ -25,7 +25,6 @@ import torch.distributed as dist
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb, autodetect_device_type
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
-from nanochat.token_codec import TokenCodec
 from tasks.gsm8k import GSM8K
 
 # -----------------------------------------------------------------------------
@@ -74,7 +73,6 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl
 # Init model and tokenizer
 model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag=args.model_tag, step=args.model_step)
 engine = Engine(model, tokenizer) # for sampling rollouts
-token_codec = TokenCodec(tokenizer)
 
 # -----------------------------------------------------------------------------
 # Rollout / sampling generator loop that yields batches of examples for training
@@ -122,7 +120,7 @@ def get_batch():
             # Get just the generated tokens (after the prompt)
             generated_tokens = sample_tokens.slice(prefix_length)
             # Decode the generated response
-            generated_text = token_codec.decode(generated_tokens)
+            generated_text = tokenizer.decode_sequence(generated_tokens)
             # Calculate the reward
             reward = train_task.reward(conversation, generated_text)
             rewards.append(reward)
@@ -180,7 +178,7 @@ def run_gsm8k_eval(task, tokenizer, engine,
         outcomes = []
         for sample_tokens in generated_token_sequences:
             generated_tokens = sample_tokens.slice(prefix_length)
-            generated_text = token_codec.decode(generated_tokens)
+            generated_text = tokenizer.decode_sequence(generated_tokens)
             is_correct = task.evaluate(conversation, generated_text)
             outcomes.append({
                 "is_correct": is_correct

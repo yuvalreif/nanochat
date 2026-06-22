@@ -47,7 +47,7 @@ class MockEvalModel:
         ]
 
 
-class MockCompositionalTokenizer:
+class MockCoBPETokenizer:
     def get_default_modifier(self):
         return [0]
 
@@ -124,7 +124,7 @@ def test_evaluate_bpb_passes_modifier_batches_and_counts_modified_bytes():
         [batch],
         steps=1,
         token_bytes=token_bytes,
-        tokenizer=MockCompositionalTokenizer(),
+        tokenizer=MockCoBPETokenizer(),
     )
 
     assert len(model.calls) == 1
@@ -150,7 +150,7 @@ def test_evaluate_bpb_sums_modifier_group_losses():
         [batch],
         steps=1,
         token_bytes=token_bytes,
-        tokenizer=MockCompositionalTokenizer(),
+        tokenizer=MockCoBPETokenizer(),
     )
 
     expected_nats = 0.5 + math.log(2.0) + math.log(4.0)

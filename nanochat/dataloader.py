@@ -26,9 +26,9 @@ from nanochat.dataset import list_parquet_files
 def _resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
     if not with_modifiers:
         return 0
-    if not hasattr(tokenizer, "encode_with_modifiers"):
+    if not (hasattr(tokenizer, "has_compositional_mode") and tokenizer.has_compositional_mode()):
         raise ValueError(
-            "with_modifiers=True requires tokenizer.encode_with_modifiers(...) support."
+            "with_modifiers=True requires a compositional tokenizer."
         )
     get_num_modifier_groups = getattr(tokenizer, "get_num_modifier_groups", None)
     if get_num_modifier_groups is None:
@@ -44,29 +44,25 @@ def _resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
 
 
 def _encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with_modifiers):
+    encoded = tokenizer.encode_sequences(
+        doc_batch,
+        prepend=bos_token,
+        num_threads=tokenizer_threads,
+    )
     if with_modifiers:
-        encoded = tokenizer.encode_with_modifiers(
-            doc_batch, prepend=bos_token, num_threads=tokenizer_threads
-        )
-        out = []
-        for token_ids, modifier_rows in encoded:
-            if len(token_ids) != len(modifier_rows):
-                raise ValueError(
-                    "Compositional tokenizer returned mismatched token/modifier lengths: "
-                    f"{len(token_ids)} != {len(modifier_rows)}"
-                )
-            out.append((token_ids, modifier_rows))
-        return out
-
-    token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-    return [(tokens, None) for tokens in token_lists]
+        for seq in encoded:
+            if seq.modifiers is None:
+                raise ValueError("Compositional dataloader expected modifier rows.")
+    return encoded
 
 
-def _copy_doc_span(row_buffer, row_mod_buffer, *, row_idx, pos, token_ids, modifier_rows, take):
-    row_buffer[row_idx, pos:pos + take] = torch.tensor(token_ids[:take], dtype=torch.long)
+def _copy_doc_span(row_buffer, row_mod_buffer, *, row_idx, pos, doc, take):
+    row_buffer[row_idx, pos:pos + take] = torch.tensor(doc.ids[:take], dtype=torch.long)
     if row_mod_buffer is not None:
+        if doc.modifiers is None:
+            raise ValueError("modifier rows are required when row_mod_buffer is set")
         row_mod_buffer[row_idx, pos:pos + take] = torch.tensor(
-            modifier_rows[:take], dtype=torch.long
+            doc.modifiers[:take], dtype=torch.long
         )
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
@@ -202,21 +198,20 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 best_idx = -1
                 best_len = 0
                 for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc[0])
+                    doc_len = len(doc)
                     if doc_len <= remaining and doc_len > best_len:
                         best_idx = i
                         best_len = doc_len
 
                 if best_idx >= 0:
-                    doc_tokens, doc_mods = doc_buffer.pop(best_idx)
-                    doc_len = len(doc_tokens)
+                    doc = doc_buffer.pop(best_idx)
+                    doc_len = len(doc)
                     _copy_doc_span(
                         row_buffer,
                         row_mod_buffer if with_modifiers else None,
                         row_idx=row_idx,
                         pos=pos,
-                        token_ids=doc_tokens,
-                        modifier_rows=doc_mods,
+                        doc=doc,
                         take=doc_len,
                     )
                     pos += doc_len
@@ -224,16 +219,15 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
                     shortest_idx = min(
                         range(len(doc_buffer)),
-                        key=lambda i: len(doc_buffer[i][0]),
+                        key=lambda i: len(doc_buffer[i]),
                     )
-                    doc_tokens, doc_mods = doc_buffer.pop(shortest_idx)
+                    doc = doc_buffer.pop(shortest_idx)
                     _copy_doc_span(
                         row_buffer,
                         row_mod_buffer if with_modifiers else None,
                         row_idx=row_idx,
                         pos=pos,
-                        token_ids=doc_tokens,
-                        modifier_rows=doc_mods,
+                        doc=doc,
                         take=remaining,
                     )
                     pos += remaining

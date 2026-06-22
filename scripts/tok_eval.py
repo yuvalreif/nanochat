@@ -175,18 +175,9 @@ for tokenizer_name in ["gpt2", "gpt4", "ours"]:
 
     vocab_sizes[tokenizer_name] = tokenizer.get_vocab_size()
     tokenizer_results[tokenizer_name] = {}
-    compositional_mode = bool(
-        hasattr(tokenizer, "has_compositional_mode")
-        and tokenizer.has_compositional_mode()
-    )
-
     for name, text in all_text:
-        if compositional_mode:
-            encoded, modifier_rows = tokenizer.encode_with_modifiers(text)
-            decoded = tokenizer.decode_with_modifiers(encoded, modifier_rows)
-        else:
-            encoded = tokenizer.encode(text)
-            decoded = tokenizer.decode(encoded)
+        encoded = tokenizer.encode_sequence(text)
+        decoded = tokenizer.decode_sequence(encoded)
         assert decoded == text
 
         encoded_bytes = text.encode('utf-8')

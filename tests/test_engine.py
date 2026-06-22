@@ -6,7 +6,7 @@ python -m pytest tests/test_engine.py -v
 
 import torch
 from nanochat.engine import KVCache, Engine
-from nanochat.token_codec import TokenSequence
+from nanochat.token_codec import TokenSequence, TokenSequenceMixin
 from dataclasses import dataclass
 
 
@@ -72,7 +72,7 @@ class MockCompositionalModel(MockModel):
         ]
 
 
-class ByteTokenizer:
+class ByteTokenizer(TokenSequenceMixin):
     """
     Simple byte-level tokenizer for testing.
     Tokens 0-255 are raw bytes, 256+ are special tokens.

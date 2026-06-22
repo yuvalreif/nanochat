@@ -16,7 +16,6 @@ import torch.distributed as dist
 from nanochat.common import compute_init, compute_cleanup, get_dist_info, print0, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
-from nanochat.token_codec import TokenCodec
 
 from tasks.humaneval import HumanEval
 from tasks.mmlu import MMLU
@@ -33,7 +32,6 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
     device = model.get_device()
 
     num_problems = len(task_object) if max_problems is None else min(len(task_object), max_problems)
-    token_codec = TokenCodec(tokenizer)
 
     # Run the evaluation
     num_passed, total = 0, 0
@@ -52,7 +50,7 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
         )
         # Decode the completions as text
         prefix_length = len(encoded_prompt)
-        completions = [token_codec.decode(result_tokens.slice(prefix_length)) for result_tokens in results]
+        completions = [tokenizer.decode_sequence(result_tokens.slice(prefix_length)) for result_tokens in results]
         # Evaluate success criteria
         outcomes = [task_object.evaluate(conversation, completion) for completion in completions]
         passed = any(outcomes)

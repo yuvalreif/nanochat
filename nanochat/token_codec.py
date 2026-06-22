@@ -15,6 +15,96 @@ def tokenizer_has_modifiers(tokenizer) -> bool:
     )
 
 
+def normalize_token_sequence(tokenizer, tokens) -> "TokenSequence":
+    has_modifiers = tokenizer_has_modifiers(tokenizer)
+    if isinstance(tokens, TokenSequence):
+        seq = tokens.copy()
+    elif isinstance(tokens, tuple):
+        token_ids, modifiers = tokens
+        seq = TokenSequence(list(token_ids), [list(row) for row in modifiers])
+    else:
+        seq = TokenSequence(list(tokens))
+    if has_modifiers and seq.modifiers is None:
+        default = tokenizer.get_default_modifier()
+        seq.modifiers = [list(default) for _ in seq.ids]
+    if not has_modifiers and seq.modifiers is not None:
+        raise ValueError("modifier-bearing TokenSequence requires a compositional tokenizer")
+    return seq
+
+
+def token_piece_for_tokenizer(tokenizer, token_id: int, modifier: Sequence[int] | None = None) -> "TokenPiece":
+    if tokenizer_has_modifiers(tokenizer):
+        if modifier is None:
+            modifier = tokenizer.get_default_modifier()
+        return TokenPiece(int(token_id), [int(v) for v in modifier])
+    if modifier is not None:
+        raise ValueError("modifier-bearing TokenPiece requires a compositional tokenizer")
+    return TokenPiece(int(token_id))
+
+
+def empty_token_sequence_for_tokenizer(tokenizer) -> "TokenSequence":
+    return TokenSequence([], [] if tokenizer_has_modifiers(tokenizer) else None)
+
+
+def encode_token_sequence(tokenizer, text: str, prepend=None, append=None, **kwargs) -> "TokenSequence":
+    if tokenizer_has_modifiers(tokenizer):
+        token_ids, modifiers = tokenizer.encode_with_modifiers(
+            text,
+            prepend=prepend,
+            append=append,
+            **kwargs,
+        )
+        return TokenSequence(token_ids, modifiers)
+    return TokenSequence(tokenizer.encode(text, prepend=prepend, append=append, **kwargs))
+
+
+def encode_token_sequences(tokenizer, texts: list[str], prepend=None, append=None, **kwargs) -> list["TokenSequence"]:
+    if tokenizer_has_modifiers(tokenizer):
+        return [
+            TokenSequence(token_ids, modifiers)
+            for token_ids, modifiers in tokenizer.encode_with_modifiers(
+                texts,
+                prepend=prepend,
+                append=append,
+                **kwargs,
+            )
+        ]
+    return [
+        TokenSequence(token_ids)
+        for token_ids in tokenizer(texts, prepend=prepend, append=append, **kwargs)
+    ]
+
+
+def decode_token_sequence(tokenizer, sequence) -> str:
+    seq = normalize_token_sequence(tokenizer, sequence)
+    if seq.modifiers is not None:
+        return tokenizer.decode_with_modifiers(seq.ids, seq.modifiers)
+    return tokenizer.decode(seq.ids)
+
+
+class TokenSequenceMixin:
+    def has_compositional_mode(self) -> bool:
+        return False
+
+    def normalize_sequence(self, tokens) -> "TokenSequence":
+        return normalize_token_sequence(self, tokens)
+
+    def token_piece(self, token_id: int, modifier: Sequence[int] | None = None) -> "TokenPiece":
+        return token_piece_for_tokenizer(self, token_id, modifier)
+
+    def empty_sequence(self) -> "TokenSequence":
+        return empty_token_sequence_for_tokenizer(self)
+
+    def encode_sequence(self, text: str, prepend=None, append=None, **kwargs) -> "TokenSequence":
+        return encode_token_sequence(self, text, prepend=prepend, append=append, **kwargs)
+
+    def encode_sequences(self, texts: list[str], prepend=None, append=None, **kwargs) -> list["TokenSequence"]:
+        return encode_token_sequences(self, texts, prepend=prepend, append=append, **kwargs)
+
+    def decode_sequence(self, sequence) -> str:
+        return decode_token_sequence(self, sequence)
+
+
 @dataclass(frozen=True)
 class TokenPiece:
     id: int
@@ -141,58 +231,34 @@ class TokenCodec:
         return list(self.tokenizer.get_default_modifier())
 
     def normalize(self, tokens) -> TokenSequence:
-        if isinstance(tokens, TokenSequence):
-            seq = tokens.copy()
-        elif isinstance(tokens, tuple):
-            token_ids, modifiers = tokens
-            seq = TokenSequence(list(token_ids), [list(row) for row in modifiers])
-        else:
-            seq = TokenSequence(list(tokens))
-        if self.has_modifiers and seq.modifiers is None:
-            default = self.default_modifier()
-            seq.modifiers = [list(default) for _ in seq.ids]
-        return seq
+        if hasattr(self.tokenizer, "normalize_sequence"):
+            return self.tokenizer.normalize_sequence(tokens)
+        return normalize_token_sequence(self.tokenizer, tokens)
 
-    def encode_text(self, text: str, prepend=None, append=None) -> TokenSequence:
-        if self.has_modifiers:
-            token_ids, modifiers = self.tokenizer.encode_with_modifiers(
-                text,
-                prepend=prepend,
-                append=append,
-            )
-            return TokenSequence(token_ids, modifiers)
-        return TokenSequence(self.tokenizer.encode(text, prepend=prepend, append=append))
+    def encode_text(self, text: str, prepend=None, append=None, **kwargs) -> TokenSequence:
+        if hasattr(self.tokenizer, "encode_sequence"):
+            return self.tokenizer.encode_sequence(text, prepend=prepend, append=append, **kwargs)
+        return encode_token_sequence(self.tokenizer, text, prepend=prepend, append=append, **kwargs)
 
-    def encode_texts(self, texts: list[str], prepend=None, append=None) -> list[TokenSequence]:
-        if self.has_modifiers:
-            return [
-                TokenSequence(token_ids, modifiers)
-                for token_ids, modifiers in self.tokenizer.encode_with_modifiers(
-                    texts,
-                    prepend=prepend,
-                    append=append,
-                )
-            ]
-        return [
-            TokenSequence(token_ids)
-            for token_ids in self.tokenizer(texts, prepend=prepend, append=append)
-        ]
+    def encode_texts(self, texts: list[str], prepend=None, append=None, **kwargs) -> list[TokenSequence]:
+        if hasattr(self.tokenizer, "encode_sequences"):
+            return self.tokenizer.encode_sequences(texts, prepend=prepend, append=append, **kwargs)
+        return encode_token_sequences(self.tokenizer, texts, prepend=prepend, append=append, **kwargs)
 
     def decode(self, sequence) -> str:
-        seq = self.normalize(sequence)
-        if seq.modifiers is not None:
-            return self.tokenizer.decode_with_modifiers(seq.ids, seq.modifiers)
-        return self.tokenizer.decode(seq.ids)
+        if hasattr(self.tokenizer, "decode_sequence"):
+            return self.tokenizer.decode_sequence(sequence)
+        return decode_token_sequence(self.tokenizer, sequence)
 
     def piece(self, token_id: int, modifier: Sequence[int] | None = None) -> TokenPiece:
-        if self.has_modifiers:
-            if modifier is None:
-                modifier = self.default_modifier()
-            return TokenPiece(int(token_id), [int(v) for v in modifier])
-        return TokenPiece(int(token_id))
+        if hasattr(self.tokenizer, "token_piece"):
+            return self.tokenizer.token_piece(token_id, modifier)
+        return token_piece_for_tokenizer(self.tokenizer, token_id, modifier)
 
     def empty_sequence(self) -> TokenSequence:
-        return TokenSequence([], [] if self.has_modifiers else None)
+        if hasattr(self.tokenizer, "empty_sequence"):
+            return self.tokenizer.empty_sequence()
+        return empty_token_sequence_for_tokenizer(self.tokenizer)
 
     def empty_step(self) -> TokenStep:
         return TokenStep([], [] if self.has_modifiers else None)

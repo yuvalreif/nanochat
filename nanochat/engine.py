@@ -190,7 +190,7 @@ class Engine:
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
         """Same as generate, but does single prefill and then clones the KV cache."""
-        prompt = self.token_codec.normalize(tokens)
+        prompt = self.tokenizer.normalize_sequence(tokens)
         compositional_mode = prompt.modifiers is not None
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
@@ -282,7 +282,7 @@ class Engine:
                 if is_forced:
                     next_piece = state.forced_steps.popleft()
                 else:
-                    next_piece = self.token_codec.piece(
+                    next_piece = self.tokenizer.token_piece(
                         sampled_tokens[i],
                         None if sampled_modifier_rows is None else sampled_modifier_rows[i],
                     )
@@ -295,18 +295,18 @@ class Engine:
                 # Handle tool logic
                 if next_piece.id == python_start:
                     state.in_python_block = True
-                    state.python_expr_tokens = self.token_codec.empty_sequence()
+                    state.python_expr_tokens = self.tokenizer.empty_sequence()
                 elif next_piece.id == python_end and state.in_python_block:
                     state.in_python_block = False
                     if state.python_expr_tokens is not None and len(state.python_expr_tokens) > 0:
-                        expr = self.token_codec.decode(state.python_expr_tokens)
+                        expr = self.tokenizer.decode_sequence(state.python_expr_tokens)
                         result = use_calculator(expr)
                         if result is not None:
-                            result_tokens = self.token_codec.encode_text(str(result))
-                            state.forced_steps.append(self.token_codec.piece(output_start))
+                            result_tokens = self.tokenizer.encode_sequence(str(result))
+                            state.forced_steps.append(self.tokenizer.token_piece(output_start))
                             state.forced_steps.extend(result_tokens.pieces())
-                            state.forced_steps.append(self.token_codec.piece(output_end))
-                    state.python_expr_tokens = self.token_codec.empty_sequence()
+                            state.forced_steps.append(self.tokenizer.token_piece(output_end))
+                    state.python_expr_tokens = self.tokenizer.empty_sequence()
                 elif state.in_python_block:
                     state.python_expr_tokens.append_piece(next_piece)
 
@@ -334,7 +334,7 @@ class Engine:
         Returns a list of token sequences (list of lists of ints).
         Terminal tokens (assistant_end, bos) are not included in the results.
         """
-        prompt = self.token_codec.normalize(tokens)
+        prompt = self.tokenizer.normalize_sequence(tokens)
         assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
         bos = self.tokenizer.get_bos_token_id()
         results = [prompt.copy() for _ in range(num_samples)]

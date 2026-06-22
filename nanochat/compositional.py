@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from nanochat.compositional_rust import build_rust_backend
+from nanochat.token_codec import TokenSequenceMixin
 
 
 MULTI_TOKEN_FIRST_GROUPS = {
@@ -288,8 +289,8 @@ class CompositionalSpec:
         return payload
 
 
-class CompositionalTokenizer:
-    """Rust-backed compositional tokenizer wrapper."""
+class RustCoBPETokenizer(TokenSequenceMixin):
+    """Rust-backed CoBPE tokenizer wrapper."""
 
     def __init__(self, base_tokenizer, spec: CompositionalSpec, *, tokenizer_dir: Optional[str] = None):
         self.base_tokenizer = base_tokenizer
@@ -298,7 +299,7 @@ class CompositionalTokenizer:
         if self.rust_backend is None:
             raise RuntimeError(
                 "Compositional tokenizer requires the Rust backend at runtime. "
-                "Install rustbpe with CompositionalTokenizer support and load from a "
+                "Install rustbpe with CoBPE tokenizer support and load from a "
                 "tokenizer directory containing tokenizer.pkl."
             )
 

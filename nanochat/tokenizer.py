@@ -11,7 +11,8 @@ import re
 import copy
 from functools import lru_cache
 
-from nanochat.compositional import CompositionalSpec, CompositionalTokenizer
+from nanochat.compositional import CompositionalSpec, RustCoBPETokenizer
+from nanochat.token_codec import TokenSequenceMixin
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
@@ -109,7 +110,7 @@ def build_backend_tokenizer(
     tokenizer.add_special_tokens(special_tokens_in_id_order)
     return tokenizer
 
-class HuggingFaceTokenizer:
+class HuggingFaceTokenizer(TokenSequenceMixin):
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
 
     def __init__(self, tokenizer):
@@ -277,7 +278,7 @@ import pickle
 import rustbpe
 import tiktoken
 
-class RustBPETokenizer:
+class RustBPETokenizer(TokenSequenceMixin):
     """Light wrapper around tiktoken (for efficient inference) but train with rustbpe"""
 
     def __init__(self, enc, bos_token):
@@ -621,7 +622,7 @@ def get_tokenizer():
     metadata_path = os.path.join(tokenizer_dir, "compositional.json")
     if os.path.exists(metadata_path):
         spec = CompositionalSpec.from_path(metadata_path)
-        return CompositionalTokenizer(tokenizer, spec, tokenizer_dir=tokenizer_dir)
+        return RustCoBPETokenizer(tokenizer, spec, tokenizer_dir=tokenizer_dir)
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     return tokenizer
 

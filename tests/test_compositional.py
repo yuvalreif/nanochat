@@ -2,8 +2,9 @@ import json
 
 import pytest
 
-from nanochat.compositional import CompositionalSpec, CompositionalTokenizer, build_cobpe_metadata
+from nanochat.compositional import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanochat.token_codec import TokenPiece, TokenSequence
 
 
 def test_build_cobpe_metadata_is_complete_and_json_serializable():
@@ -151,12 +152,12 @@ def _simple_spec():
     )
 
 
-def test_compositional_tokenizer_delegates_to_rust_backend(monkeypatch):
+def test_rust_cobpe_tokenizer_delegates_to_rust_backend(monkeypatch):
     from nanochat import compositional as compositional_mod
 
     monkeypatch.setattr(compositional_mod, "build_rust_backend", lambda spec, tokenizer_dir=None: MockBackend())
 
-    tokenizer = compositional_mod.CompositionalTokenizer(ToyTokenizer(), _simple_spec())
+    tokenizer = compositional_mod.RustCoBPETokenizer(ToyTokenizer(), _simple_spec())
 
     single = tokenizer.encode_with_modifiers("ab", prepend=tokenizer.get_bos_token_id())
     batch = tokenizer.encode_with_modifiers(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
@@ -167,10 +168,18 @@ def test_compositional_tokenizer_delegates_to_rust_backend(monkeypatch):
     assert tokenizer.decode_with_modifiers([12], [[2, 0]]) == "AB"
     assert tokenizer.utf8_len_with_modifiers_batch([12], [[2, 0]]) == [2]
 
+    seq = tokenizer.encode_sequence("ab", prepend=tokenizer.get_bos_token_id())
+    batch_seq = tokenizer.encode_sequences(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
+    assert seq == TokenSequence([99, 12], [[0, 0], [2, 0]])
+    assert batch_seq == [seq, seq]
+    assert tokenizer.decode_sequence(TokenSequence([12], [[2, 0]])) == "AB"
+    assert tokenizer.empty_sequence() == TokenSequence([], [])
+    assert tokenizer.token_piece(99) == TokenPiece(99, [0, 0])
 
-def test_compositional_tokenizer_requires_rust_backend():
+
+def test_rust_cobpe_tokenizer_requires_rust_backend():
     with pytest.raises(RuntimeError, match="requires the Rust backend"):
-        CompositionalTokenizer(ToyTokenizer(), _simple_spec())
+        RustCoBPETokenizer(ToyTokenizer(), _simple_spec())
 
 
 def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
@@ -202,21 +211,27 @@ def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(compositional_mod, "build_rust_backend", lambda spec, tokenizer_dir=None: MockBackend())
 
     tok = tokenizer_mod.get_tokenizer()
-    assert isinstance(tok, CompositionalTokenizer)
+    assert isinstance(tok, RustCoBPETokenizer)
     assert tok.get_num_modifier_groups() == 1
 
 
 def test_dataloader_with_modifiers_yields_modifier_batches(monkeypatch):
     class MockTokenizer:
+        def has_compositional_mode(self):
+            return True
+
         def get_bos_token_id(self):
             return 99
 
         def get_num_modifier_groups(self):
             return 1
 
-        def encode_with_modifiers(self, texts, prepend=None, append=None, num_threads=8):
+        def encode_sequences(self, texts, prepend=None, append=None, num_threads=8):
             assert prepend == 99
-            return [([99, 10, 11], [[0], [1], [2]]) for _ in texts]
+            return [
+                TokenSequence([99, 10, 11], [[0], [1], [2]])
+                for _ in texts
+            ]
 
     def fake_document_batches(split, resume_state_dict, tokenizer_batch_size):
         while True:
@@ -248,7 +263,7 @@ def test_dataloader_with_modifiers_requires_tokenizer_support(monkeypatch):
 
     monkeypatch.setattr("nanochat.dataloader._document_batches", fake_document_batches)
 
-    with pytest.raises(ValueError, match="encode_with_modifiers"):
+    with pytest.raises(ValueError, match="compositional tokenizer"):
         loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
             object(),
             B=1,
