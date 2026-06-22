@@ -235,7 +235,7 @@ def test_compositional_spec_to_rust_config_exports_runtime_contract():
         }
     )
 
-    config = spec.to_rust_config(tokenizer_json='{"version":"1.0"}')
+    config = spec.to_rust_config()
     assert config["group_names"] == [
         "space_prefix",
         "determiners",

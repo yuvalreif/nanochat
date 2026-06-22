@@ -519,7 +519,7 @@ class CompositionalSpec:
                         break
         return out
 
-    def to_rust_config(self, tokenizer_json: Optional[str] = None) -> dict[str, Any]:
+    def to_rust_config(self) -> dict[str, Any]:
         entries = []
         for entry in self.sequence_entries:
             entries.append(
@@ -581,8 +581,6 @@ class CompositionalSpec:
                 },
             },
         }
-        if tokenizer_json is not None:
-            payload["tokenizer_json"] = tokenizer_json
         return payload
 
 

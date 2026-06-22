@@ -1,8 +1,8 @@
 """
-Optional Rust-backed compositional runtime bridge.
+Rustbpe-backed compositional tokenizer bridge.
 
 This module keeps the Python side very small:
-- try to load a compiled Rust processor
+- try to load the packaged Rust tokenizer
 - pass a compact JSON config derived from compositional metadata
 - normalize the returned ids / modifier rows
 """
@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    import nanochat_compositional_rust as _nanochat_compositional_rust  # type: ignore[import-not-found]
+    import rustbpe as _rustbpe
 except Exception:
-    _nanochat_compositional_rust = None
+    _rustbpe = None
 
 
 def _normalize_result(result: Any) -> tuple[list[int], list[list[int]]]:
@@ -30,33 +30,45 @@ def _normalize_result(result: Any) -> tuple[list[int], list[list[int]]]:
 
 
 class RustCompositionalBackend:
-    def __init__(self, processor: Any):
-        self._processor = processor
+    def __init__(self, tokenizer: Any):
+        self._tokenizer = tokenizer
 
     def process_text(self, text: str) -> tuple[list[int], list[list[int]]]:
-        return _normalize_result(self._processor.process_text(text))
+        return _normalize_result(self._tokenizer.process_text(text))
 
     def process_text_batch(self, texts: list[str]) -> list[tuple[list[int], list[list[int]]]]:
-        return [_normalize_result(item) for item in self._processor.process_text_batch(texts)]
+        return [
+            _normalize_result(item)
+            for item in self._tokenizer.process_text_batch(texts)
+        ]
 
     def decode_with_modifiers(self, token_ids: list[int], modifier_rows: list[list[int]]) -> str:
-        return str(self._processor.decode_with_modifiers(token_ids, modifier_rows))
+        return str(self._tokenizer.decode_with_modifiers(token_ids, modifier_rows))
 
     def decode_token_with_modifiers(self, token_id: int, modifier_row: list[int]) -> str:
-        return str(self._processor.decode_with_modifiers([int(token_id)], [[int(v) for v in modifier_row]]))
+        return str(
+            self._tokenizer.decode_with_modifiers(
+                [int(token_id)], [[int(v) for v in modifier_row]]
+            )
+        )
 
     def utf8_len_with_modifiers_batch(
         self,
         token_ids: list[int],
         modifier_rows: list[list[int]],
     ) -> list[int]:
-        return [int(v) for v in self._processor.utf8_len_with_modifiers_batch(token_ids, modifier_rows)]
+        return [
+            int(v)
+            for v in self._tokenizer.utf8_len_with_modifiers_batch(
+                token_ids, modifier_rows
+            )
+        ]
 
     def debug_tokenize_text(self, text: str) -> dict[str, Any]:
-        return json.loads(self._processor.debug_tokenize_text_json(text))
+        return json.loads(self._tokenizer.debug_tokenize_text_json(text))
 
     def debug_process_text(self, text: str) -> dict[str, Any]:
-        return json.loads(self._processor.debug_process_text_json(text))
+        return json.loads(self._tokenizer.debug_process_text_json(text))
 
 
 def _extract_base_bpe_config(tokenizer_dir: Optional[str]) -> Optional[dict[str, Any]]:
@@ -100,23 +112,18 @@ def _extract_base_bpe_config(tokenizer_dir: Optional[str]) -> Optional[dict[str,
     }
 
 
-def build_rust_backend(spec, *, tokenizer_dir: Optional[str] = None) -> Optional[RustCompositionalBackend]:
-    if _nanochat_compositional_rust is None or not hasattr(_nanochat_compositional_rust, "CompositionalProcessor"):
+def build_rust_backend(
+    spec, *, tokenizer_dir: Optional[str] = None
+) -> Optional[RustCompositionalBackend]:
+    if _rustbpe is None or not hasattr(_rustbpe, "CompositionalTokenizer"):
         return None
 
-    tokenizer_json = None
-    if tokenizer_dir is not None:
-        tokenizer_json_path = Path(tokenizer_dir) / "tokenizer.json"
-        if tokenizer_json_path.exists():
-            tokenizer_json = tokenizer_json_path.read_text(encoding="utf-8")
-
-    payload = spec.to_rust_config(tokenizer_json=tokenizer_json)
+    payload = spec.to_rust_config()
     base_bpe = _extract_base_bpe_config(tokenizer_dir)
-    if base_bpe is not None:
-        payload["base_bpe"] = base_bpe
-    if not payload.get("token_meta") and not payload.get("tokenizer_json") and base_bpe is None:
+    if base_bpe is None:
         return None
+    payload["base_bpe"] = base_bpe
 
     config_json = json.dumps(payload, separators=(",", ":"))
-    processor = _nanochat_compositional_rust.CompositionalProcessor(config_json)
-    return RustCompositionalBackend(processor)
+    tokenizer = _rustbpe.CompositionalTokenizer(config_json)
+    return RustCompositionalBackend(tokenizer)

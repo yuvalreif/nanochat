@@ -13,7 +13,6 @@
 # Keep CoBPE artifacts separate from the baseline speedrun.
 export OMP_NUM_THREADS=1
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat_cobpe"
-export PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
 mkdir -p $NANOCHAT_BASE_DIR
 
 # -----------------------------------------------------------------------------
@@ -27,14 +26,6 @@ command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
-
-# Build the CoBPE Rust tokenizer runtime into the active environment.
-if ! command -v cargo &> /dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-    source "$HOME/.cargo/env"
-fi
-uv pip install maturin
-maturin develop --release --manifest-path rust_ext/compositional_runtime/Cargo.toml
 
 # -----------------------------------------------------------------------------
 # wandb setup
