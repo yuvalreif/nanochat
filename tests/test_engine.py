@@ -5,6 +5,7 @@ python -m pytest tests/test_engine.py -v
 """
 
 import torch
+import pytest
 from nanochat.engine import KVCache, Engine
 from nanochat.token_codec import TokenSequence, TokenSequenceMixin
 from dataclasses import dataclass
@@ -269,6 +270,12 @@ def test_generate_batch_returns_token_sequences_for_regular_bpe():
     assert results[0].modifiers is None
     assert list(results[0]) == results[0].ids
     assert len(masks[0]) == len(results[0])
+
+
+def test_regular_bpe_generate_requires_list_of_ints():
+    engine = Engine(MockModel(), ByteTokenizer())
+    with pytest.raises(AssertionError, match="expecting list of ints"):
+        next(engine.generate(TokenSequence([261, 72]), max_tokens=1))
 
 
 def test_compositional_generate_accepts_plain_token_ids_with_default_modifiers():

@@ -190,6 +190,8 @@ class Engine:
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
         """Same as generate, but does single prefill and then clones the KV cache."""
+        if not self.token_codec.has_modifiers:
+            assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         prompt = self.tokenizer.normalize_sequence(tokens)
         compositional_mode = prompt.modifiers is not None
         device = self.model.get_device()
@@ -215,7 +217,13 @@ class Engine:
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
-        kv_cache_prefill = KVCache(batch_size=1, seq_len=len(prompt), device=device, dtype=dtype, **kv_model_kwargs)
+        kv_cache_prefill = KVCache(
+            batch_size=1,
+            seq_len=len(tokens),
+            device=device,
+            dtype=dtype,
+            **kv_model_kwargs,
+        )
         ids, modifier_ids = self.token_codec.sequence_tensor(prompt, device)
         if compositional_mode:
             logits, hidden = self.model.forward(ids, kv_cache=kv_cache_prefill, modifier_ids=modifier_ids, return_hidden=True)
@@ -226,7 +234,13 @@ class Engine:
 
         # 2) Replicate the KV cache for each sample/row
         kv_length_hint = (len(prompt) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
-        kv_cache_decode = KVCache(batch_size=num_samples, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_model_kwargs)
+        kv_cache_decode = KVCache(
+            batch_size=num_samples,
+            seq_len=kv_length_hint,
+            device=device,
+            dtype=dtype,
+            **kv_model_kwargs,
+        )
         kv_cache_decode.prefill(kv_cache_prefill)
         del kv_cache_prefill # no need to keep this memory around
 
@@ -308,7 +322,7 @@ class Engine:
         results = [prompt.copy() for _ in range(num_samples)]
         masks = [[0] * len(prompt) for _ in range(num_samples)]
         completed = [False] * num_samples
-        for step, token_masks in self.generate(prompt, num_samples, **kwargs):
+        for step, token_masks in self.generate(tokens, num_samples, **kwargs):
             for i, (token, mask) in enumerate(zip(step.ids, token_masks)):
                 if not completed[i]:
                     if token == assistant_end or token == bos:
