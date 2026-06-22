@@ -4,7 +4,7 @@ Rustbpe-backed CoBPE tokenizer bridge.
 This module keeps the Python side very small:
 - try to load the packaged Rust tokenizer
 - pass a compact JSON config derived from CoBPE metadata
-- normalize the returned ids / modifier rows
+- preserve the Rust-returned tuple/list shape used by the training dataloader
 """
 
 from __future__ import annotations
@@ -25,8 +25,7 @@ def _normalize_result(result: Any) -> tuple[list[int], list[list[int]]]:
         token_ids = [int(v) for v in result["output_ids"]]
         modifier_rows = [[int(x) for x in row] for row in result["modifier_rows"]]
         return token_ids, modifier_rows
-    token_ids, modifier_rows = result
-    return [int(v) for v in token_ids], [[int(x) for x in row] for row in modifier_rows]
+    return result
 
 
 class RustCompositionalBackend:

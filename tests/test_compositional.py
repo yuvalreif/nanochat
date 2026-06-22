@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from nanochat.cobpe.runtime import RustCompositionalBackend
 from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanochat.token_codec import TokenItem, TokenSequence, stack_sequences
@@ -102,6 +103,24 @@ def test_compositional_spec_to_rust_config_exports_runtime_contract():
         "max_prefix_punctuation": 1,
         "max_suffix_punctuation": 1,
     }
+
+
+def test_rust_backend_preserves_tuple_results_without_extra_copy():
+    class MockRustTokenizer:
+        def __init__(self):
+            self.single = ([1, 2], [[0], [1]])
+            self.batch = [([3], [[2]])]
+
+        def process_text(self, text):
+            return self.single
+
+        def process_text_batch(self, texts):
+            return self.batch
+
+    rust = MockRustTokenizer()
+    backend = RustCompositionalBackend(rust)
+    assert backend.process_text("x") is rust.single
+    assert backend.process_text_batch(["y"])[0] is rust.batch[0]
 
 
 class ToyTokenizer:
