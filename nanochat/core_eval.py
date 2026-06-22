@@ -12,7 +12,7 @@ from jinja2 import Template
 import torch
 import torch.distributed as dist
 from nanochat.cobpe.eval import find_changed_token_span, option_mean_loss_with_suffix_boundary_rule
-from nanochat.token_codec import TokenSequence, normalize_token_sequence, stack_token_sequences
+from nanochat.token_codec import TokenSequence, stack_sequences
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -102,15 +102,6 @@ def find_common_length(token_sequences, direction='left'):
         if not all(seq[idx] == token for seq in token_sequences):
             return i
     return min_len
-
-
-def stack_sequences(tokens, pad_token_id):
-    """Stack up a list of token sequences, pad to longest on the right"""
-    bsz, seq_len = len(tokens), max(len(x) for x in tokens)
-    input_ids = torch.full((bsz, seq_len), pad_token_id, dtype=torch.long)
-    for i, x in enumerate(tokens):
-        input_ids[i, :len(x)] = torch.tensor(x, dtype=torch.long)
-    return input_ids
 
 
 def _token_units(tokens):
@@ -266,13 +257,8 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
-    has_modifiers = any(isinstance(seq, TokenSequence) and seq.modifiers is not None for seq in tokens)
-    if has_modifiers:
-        tokens = [normalize_token_sequence(tokenizer, seq) for seq in tokens]
-        input_ids, input_modifier_ids = stack_token_sequences(tokens, pad_token_id, tokenizer.get_default_modifier())
-    else:
-        input_ids = stack_sequences(tokens, pad_token_id)
-        input_modifier_ids = None
+    default_modifier = tokenizer.get_default_modifier() if any(isinstance(seq, TokenSequence) and seq.modifiers is not None for seq in tokens) else None
+    input_ids, input_modifier_ids = stack_sequences(tokens, pad_token_id, default_modifier)
     input_ids = input_ids.to(device)
     if input_modifier_ids is not None:
         input_modifier_ids = input_modifier_ids.to(device)
@@ -300,10 +286,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
                            for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
         else:
             mean_losses = [
-                option_mean_loss_with_suffix_boundary_rule(
-                    model_output.losses, model_output.modifier_group_losses, input_modifier_ids,
-                    tokenizer, i, si, ei,
-                )
+                option_mean_loss_with_suffix_boundary_rule(model_output.losses, model_output.modifier_group_losses, input_modifier_ids, tokenizer, i, si, ei)
                 for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))
             ]
         pred_idx = mean_losses.index(min(mean_losses))

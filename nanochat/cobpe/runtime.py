@@ -46,11 +46,7 @@ class RustCompositionalBackend:
         return str(self._tokenizer.decode_with_modifiers(token_ids, modifier_rows))
 
     def decode_token_with_modifiers(self, token_id: int, modifier_row: list[int]) -> str:
-        return str(
-            self._tokenizer.decode_with_modifiers(
-                [int(token_id)], [[int(v) for v in modifier_row]]
-            )
-        )
+        return str(self._tokenizer.decode_with_modifiers([int(token_id)], [[int(v) for v in modifier_row]]))
 
     def utf8_len_with_modifiers_batch(
         self,
@@ -93,12 +89,7 @@ def _extract_base_bpe_config(tokenizer_dir: Optional[str]) -> Optional[dict[str,
     for token_bytes, rank in sorted(mergeable_ranks.items(), key=lambda kv: int(kv[1])):
         if not isinstance(token_bytes, (bytes, bytearray)):
             return None
-        rank_entries.append(
-            {
-                "token": bytes(token_bytes).decode("latin-1"),
-                "rank": int(rank),
-            }
-        )
+        rank_entries.append({"token": bytes(token_bytes).decode("latin-1"), "rank": int(rank)})
 
     special_token_map: dict[str, int] = {}
     if isinstance(special_tokens, dict):

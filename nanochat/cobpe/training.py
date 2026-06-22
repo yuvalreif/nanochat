@@ -42,12 +42,7 @@ def train_normalized_space_cap_tokenizer(text_iterator, vocab_size):
     mergeable_ranks = {bytes(k): v for k, v in mergeable_ranks_list}
     tokens_offset = len(mergeable_ranks)
     special_tokens = {name: tokens_offset + i for i, name in enumerate(SPECIAL_TOKENS)}
-    enc = tiktoken.Encoding(
-        name="rustbpe_normalized_space_cap",
-        pat_str=pattern,
-        mergeable_ranks=mergeable_ranks,
-        special_tokens=special_tokens,
-    )
+    enc = tiktoken.Encoding(name="rustbpe_normalized_space_cap", pat_str=pattern, mergeable_ranks=mergeable_ranks, special_tokens=special_tokens)
     return RustBPETokenizer(enc, "<|bos|>")
 
 
@@ -59,11 +54,7 @@ def train_cobpe_tokenizer(text_iterator, target_vocab_size: int, *, vocab_buffer
         *redundant["space_prefixed_with_unspaced_counterpart"],
         *redundant["capitalized_with_lowercase_counterpart"],
     })
-    tokenizer, finalize_stats = finalize_tokenizer_vocab(
-        tokenizer,
-        target_vocab_size=int(target_vocab_size),
-        redundant_token_ids=redundant_ids,
-    )
+    tokenizer, finalize_stats = finalize_tokenizer_vocab(tokenizer, target_vocab_size=int(target_vocab_size), redundant_token_ids=redundant_ids)
     build_report = {
         "vocab_size_target": int(target_vocab_size),
         "vocab_buffer_size": int(vocab_buffer_size),
@@ -166,10 +157,7 @@ def finalize_tokenizer_vocab(
             f"target mergeable size {target_mergeable_size} exceeds existing {existing_mergeable_size}"
         )
 
-    redundant_mergeable = sorted(
-        int(tid) for tid in redundant_token_ids
-        if 0 <= int(tid) < existing_mergeable_size
-    )
+    redundant_mergeable = sorted(int(tid) for tid in redundant_token_ids if 0 <= int(tid) < existing_mergeable_size)
     redundant_set = set(redundant_mergeable)
     keep = set(range(min(256, existing_mergeable_size)))
     for tid in range(existing_mergeable_size):
@@ -200,12 +188,7 @@ def finalize_tokenizer_vocab(
     }
     specials_in_order = [t for t, _ in sorted(special_tokens_map.items(), key=lambda kv: kv[1])]
     new_specials = {tok: len(new_mergeable_ranks) + i for i, tok in enumerate(specials_in_order)}
-    finalized_enc = tiktoken.Encoding(
-        name=getattr(enc, "name", "rustbpe"),
-        pat_str=pattern,
-        mergeable_ranks=new_mergeable_ranks,
-        special_tokens=new_specials,
-    )
+    finalized_enc = tiktoken.Encoding(name=getattr(enc, "name", "rustbpe"), pat_str=pattern, mergeable_ranks=new_mergeable_ranks, special_tokens=new_specials)
     stats = {
         "target_vocab_size": int(target_vocab_size),
         "existing_vocab_size": int(existing_mergeable_size + num_special),

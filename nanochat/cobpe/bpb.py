@@ -151,11 +151,7 @@ def compositional_target_bytes(y, y_mods, token_bytes, tokenizer):
         mods_safe = torch.clamp(mods_flat.to(torch.long), min=0, max=max_group_size - 1)
         deltas = delta_table[group_ids, mods_safe]
         supported = supported_table[group_ids, mods_safe].all(dim=-1)
-        default_modifier = torch.tensor(
-            [int(v) for v in tokenizer.spec.default_modifier],
-            dtype=torch.long,
-            device=mods_flat.device,
-        ).view(1, -1)
+        default_modifier = torch.tensor([int(v) for v in tokenizer.spec.default_modifier], dtype=torch.long, device=mods_flat.device).view(1, -1)
         is_default = (mods_flat.to(torch.long) == default_modifier).all(dim=-1)
         base_for_row = torch.where(is_default, base_bytes[y_safe], stripped_base_bytes[y_safe])
         num_bytes = torch.where(valid, base_for_row, num_bytes)
@@ -190,11 +186,6 @@ def compositional_joint_nll_sum_groups(model, x, y, x_mods, y_mods):
     for group_idx, group_logits in enumerate(modifier_logits):
         group_targets = y_mods[..., group_idx].long()
         group_targets = torch.where(valid_targets, group_targets, torch.full_like(group_targets, -1))
-        group_loss = F.cross_entropy(
-            group_logits.view(batch_size * seq_len, -1),
-            group_targets.reshape(batch_size * seq_len),
-            ignore_index=-1,
-            reduction="none",
-        ).view(batch_size, seq_len)
+        group_loss = F.cross_entropy(group_logits.view(batch_size * seq_len, -1), group_targets.reshape(batch_size * seq_len), ignore_index=-1, reduction="none").view(batch_size, seq_len)
         modifier_loss_sum = modifier_loss_sum + group_loss
     return base_loss + modifier_loss_sum

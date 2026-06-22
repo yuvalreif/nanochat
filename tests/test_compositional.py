@@ -4,7 +4,7 @@ import pytest
 
 from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanochat.token_codec import TokenItem, TokenSequence
+from nanochat.token_codec import TokenItem, TokenSequence, stack_sequences
 
 
 def test_build_cobpe_metadata_is_complete_and_json_serializable():
@@ -26,6 +26,17 @@ def test_build_cobpe_metadata_is_complete_and_json_serializable():
     assert "det_the" in spec.group_value_names["determiners"]
     assert "prep_on" in spec.group_value_names["prepositions"]
     assert "punct_suffix_." in spec.group_value_names["suffix_punctuation"]
+
+
+def test_stack_sequences_handles_plain_and_modifier_sequences():
+    plain_ids, plain_modifiers = stack_sequences([[1, 2], [3]], pad_token_id=0)
+    assert plain_ids.tolist() == [[1, 2], [3, 0]]
+    assert plain_modifiers is None
+
+    sequences = [TokenSequence([1, 2], [[0], [1]]), TokenSequence([3], [[1]])]
+    stacked_ids, modifiers = stack_sequences(sequences, pad_token_id=0, default_modifier=[0])
+    assert stacked_ids.tolist() == [[1, 2], [3, 0]]
+    assert modifiers.tolist() == [[[0], [1]], [[1], [0]]]
 
 
 def test_compositional_spec_to_rust_config_exports_runtime_contract():

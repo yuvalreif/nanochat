@@ -15,10 +15,7 @@ import torch
 
 
 def tokenizer_has_modifiers(tokenizer) -> bool:
-    return bool(
-        hasattr(tokenizer, "has_compositional_mode")
-        and tokenizer.has_compositional_mode()
-    )
+    return bool(hasattr(tokenizer, "has_compositional_mode") and tokenizer.has_compositional_mode())
 
 
 def normalize_token_sequence(tokenizer, tokens) -> "TokenSequence":
@@ -54,12 +51,7 @@ def empty_token_sequence_for_tokenizer(tokenizer) -> "TokenSequence":
 
 def encode_token_sequence(tokenizer, text: str, prepend=None, append=None, **kwargs) -> "TokenSequence":
     if tokenizer_has_modifiers(tokenizer):
-        token_ids, modifiers = tokenizer.encode_with_modifiers(
-            text,
-            prepend=prepend,
-            append=append,
-            **kwargs,
-        )
+        token_ids, modifiers = tokenizer.encode_with_modifiers(text, prepend=prepend, append=append, **kwargs)
         return TokenSequence(token_ids, modifiers)
     return TokenSequence(tokenizer.encode(text, prepend=prepend, append=append, **kwargs))
 
@@ -68,12 +60,7 @@ def encode_token_sequences(tokenizer, texts: list[str], prepend=None, append=Non
     if tokenizer_has_modifiers(tokenizer):
         return [
             TokenSequence(token_ids, modifiers)
-            for token_ids, modifiers in tokenizer.encode_with_modifiers(
-                texts,
-                prepend=prepend,
-                append=append,
-                **kwargs,
-            )
+            for token_ids, modifiers in tokenizer.encode_with_modifiers(texts, prepend=prepend, append=append, **kwargs)
         ]
     return [
         TokenSequence(token_ids)
@@ -149,10 +136,7 @@ class TokenSequence:
         return self.modifiers is not None
 
     def copy(self) -> "TokenSequence":
-        return TokenSequence(
-            self.ids.copy(),
-            None if self.modifiers is None else [row.copy() for row in self.modifiers],
-        )
+        return TokenSequence(self.ids.copy(), None if self.modifiers is None else [row.copy() for row in self.modifiers])
 
     def units(self):
         if self.modifiers is None:
@@ -163,10 +147,7 @@ class TokenSequence:
         ]
 
     def slice(self, start=None, stop=None) -> "TokenSequence":
-        return TokenSequence(
-            self.ids[slice(start, stop)],
-            None if self.modifiers is None else self.modifiers[slice(start, stop)],
-        )
+        return TokenSequence(self.ids[slice(start, stop)], None if self.modifiers is None else self.modifiers[slice(start, stop)])
 
     def append_item(self, item: TokenItem) -> None:
         self.ids.append(int(item.id))
@@ -290,12 +271,9 @@ class TokenCodec:
         return ids, modifiers
 
 
-def stack_token_sequences(
-    sequences: Iterable[TokenSequence],
-    pad_token_id: int,
-    default_modifier: Sequence[int] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    seqs = list(sequences)
+def stack_sequences(sequences: Iterable[TokenSequence | Sequence[int]], pad_token_id: int, default_modifier: Sequence[int] | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Pad plain or modifier-bearing token sequences to a common length."""
+    seqs = [seq if isinstance(seq, TokenSequence) else TokenSequence(list(seq)) for seq in sequences]
     bsz, seq_len = len(seqs), max(len(seq) for seq in seqs)
     input_ids = torch.full((bsz, seq_len), int(pad_token_id), dtype=torch.long)
     has_modifiers = any(seq.modifiers is not None for seq in seqs)
@@ -303,11 +281,7 @@ def stack_token_sequences(
     if has_modifiers:
         if default_modifier is None:
             raise ValueError("default_modifier is required when stacking modifiers")
-        modifier_ids = torch.full(
-            (bsz, seq_len, len(default_modifier)),
-            0,
-            dtype=torch.long,
-        )
+        modifier_ids = torch.full((bsz, seq_len, len(default_modifier)), 0, dtype=torch.long)
         modifier_ids[:] = torch.tensor(default_modifier, dtype=torch.long)
     for i, seq in enumerate(seqs):
         input_ids[i, :len(seq)] = torch.tensor(seq.ids, dtype=torch.long)

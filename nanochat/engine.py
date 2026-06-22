@@ -215,21 +215,10 @@ class Engine:
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
-        kv_cache_prefill = KVCache(
-            batch_size=1,
-            seq_len=len(prompt),
-            device=device,
-            dtype=dtype,
-            **kv_model_kwargs,
-        )
+        kv_cache_prefill = KVCache(batch_size=1, seq_len=len(prompt), device=device, dtype=dtype, **kv_model_kwargs)
         ids, modifier_ids = self.token_codec.sequence_tensor(prompt, device)
         if compositional_mode:
-            logits, hidden = self.model.forward(
-                ids,
-                kv_cache=kv_cache_prefill,
-                modifier_ids=modifier_ids,
-                return_hidden=True,
-            )
+            logits, hidden = self.model.forward(ids, kv_cache=kv_cache_prefill, modifier_ids=modifier_ids, return_hidden=True)
             hidden = hidden[:, -1:, :].expand(num_samples, -1, -1).clone()
         else:
             logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
@@ -237,21 +226,12 @@ class Engine:
 
         # 2) Replicate the KV cache for each sample/row
         kv_length_hint = (len(prompt) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
-        kv_cache_decode = KVCache(
-            batch_size=num_samples,
-            seq_len=kv_length_hint,
-            device=device,
-            dtype=dtype,
-            **kv_model_kwargs,
-        )
+        kv_cache_decode = KVCache(batch_size=num_samples, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_model_kwargs)
         kv_cache_decode.prefill(kv_cache_prefill)
         del kv_cache_prefill # no need to keep this memory around
 
         # 3) Initialize states for each sample
-        row_states = [
-            RowState(prompt.copy())
-            for _ in range(num_samples)
-        ]
+        row_states = [RowState(prompt.copy()) for _ in range(num_samples)]
 
         # 4) Main generation loop
         num_generated = 0
@@ -266,11 +246,7 @@ class Engine:
             # Sample the next token for each row
             next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
             sampled_tokens = next_ids[:, 0].tolist()
-            sampled_modifier_rows = (
-                self._sample_modifier_rows(hidden, next_ids, rng, temperature, top_k)
-                if compositional_mode
-                else None
-            )
+            sampled_modifier_rows = self._sample_modifier_rows(hidden, next_ids, rng, temperature, top_k) if compositional_mode else None
 
             # Process each row: choose the next token, update state, optional tool use
             step = self.token_codec.empty_step()
@@ -282,10 +258,7 @@ class Engine:
                 if is_forced:
                     next_item = state.forced_steps.popleft()
                 else:
-                    next_item = self.tokenizer.token_item(
-                        sampled_tokens[i],
-                        None if sampled_modifier_rows is None else sampled_modifier_rows[i],
-                    )
+                    next_item = self.tokenizer.token_item(sampled_tokens[i], None if sampled_modifier_rows is None else sampled_modifier_rows[i])
                 step.append(next_item.id, next_item.modifier)
                 # Update the state of this row to include the next token
                 state.current_tokens.append_item(next_item)
@@ -317,12 +290,7 @@ class Engine:
             # Prepare logits for next iteration
             ids, modifier_ids = self.token_codec.step_tensor(step, device)
             if compositional_mode:
-                logits, hidden = self.model.forward(
-                    ids,
-                    kv_cache=kv_cache_decode,
-                    modifier_ids=modifier_ids,
-                    return_hidden=True,
-                )
+                logits, hidden = self.model.forward(ids, kv_cache=kv_cache_decode, modifier_ids=modifier_ids, return_hidden=True)
                 hidden = hidden[:, -1:, :]
                 logits = logits[:, -1, :]
             else:

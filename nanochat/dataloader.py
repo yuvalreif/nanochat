@@ -101,24 +101,13 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
     doc_buffer = []
     pq_idx, rg_idx, epoch = 0, 0, 1
-    num_modifier_groups = resolve_num_modifier_groups(
-        tokenizer,
-        with_modifiers=with_modifiers,
-    )
+    num_modifier_groups = resolve_num_modifier_groups(tokenizer, with_modifiers=with_modifiers)
     bos_token = tokenizer.get_bos_token_id()
 
     def refill_buffer():
         nonlocal pq_idx, rg_idx, epoch
         doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
-        doc_buffer.extend(
-            encode_doc_batch(
-                tokenizer,
-                doc_batch,
-                bos_token=bos_token,
-                tokenizer_threads=tokenizer_threads,
-                with_modifiers=with_modifiers,
-            )
-        )
+        doc_buffer.extend(encode_doc_batch(tokenizer, doc_batch, bos_token=bos_token, tokenizer_threads=tokenizer_threads, with_modifiers=with_modifiers))
 
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
     # This gives us contiguous views and a single HtoD transfer
@@ -132,12 +121,8 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     targets = gpu_buffer[B * T:].view(B, T)
     if with_modifiers:
         row_mod_buffer = torch.empty((B, row_capacity, num_modifier_groups), dtype=torch.long)
-        cpu_mod_buffer = torch.empty(
-            2 * B * T * num_modifier_groups, dtype=torch.long, pin_memory=use_cuda
-        )
-        gpu_mod_buffer = torch.empty(
-            2 * B * T * num_modifier_groups, dtype=torch.long, device=device
-        )
+        cpu_mod_buffer = torch.empty(2 * B * T * num_modifier_groups, dtype=torch.long, pin_memory=use_cuda)
+        gpu_mod_buffer = torch.empty(2 * B * T * num_modifier_groups, dtype=torch.long, device=device)
         cpu_input_mods = cpu_mod_buffer[: B * T * num_modifier_groups].view(B, T, num_modifier_groups)
         cpu_target_mods = cpu_mod_buffer[B * T * num_modifier_groups :].view(B, T, num_modifier_groups)
         input_mods = gpu_mod_buffer[: B * T * num_modifier_groups].view(B, T, num_modifier_groups)
@@ -165,30 +150,13 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 if best_idx >= 0:
                     doc = doc_buffer.pop(best_idx)
                     doc_len = len(doc)
-                    copy_doc_span(
-                        row_buffer,
-                        row_mod_buffer if with_modifiers else None,
-                        row_idx=row_idx,
-                        pos=pos,
-                        doc=doc,
-                        take=doc_len,
-                    )
+                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, doc=doc, take=doc_len)
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(
-                        range(len(doc_buffer)),
-                        key=lambda i: len(doc_buffer[i]),
-                    )
+                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
                     doc = doc_buffer.pop(shortest_idx)
-                    copy_doc_span(
-                        row_buffer,
-                        row_mod_buffer if with_modifiers else None,
-                        row_idx=row_idx,
-                        pos=pos,
-                        doc=doc,
-                        take=remaining,
-                    )
+                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, doc=doc, take=remaining)
                     pos += remaining
 
         # Copy to pinned CPU buffer, then single HtoD transfer

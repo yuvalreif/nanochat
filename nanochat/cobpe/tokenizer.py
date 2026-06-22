@@ -96,9 +96,7 @@ def _normalize_modifier_rows(
     modifier: Optional[Iterable[Any]],
 ) -> tuple[tuple[int, ...], ...]:
     if modifier_rows is not None:
-        rows = tuple(
-            _normalize_modifier_row(row, num_groups=num_groups) for row in modifier_rows
-        )
+        rows = tuple(_normalize_modifier_row(row, num_groups=num_groups) for row in modifier_rows)
         if len(rows) != len(base_ids):
             raise ValueError(
                 "modifier_rows length must match base_ids length: "
@@ -139,9 +137,7 @@ class CompositionalSpec:
                 "modifier_group_sizes length mismatch: "
                 f"{len(self.modifier_group_sizes)} != {self.num_modifier_groups}"
             )
-        self.default_modifier = _normalize_modifier_row(
-            default_modifier, num_groups=self.num_modifier_groups
-        )
+        self.default_modifier = _normalize_modifier_row(default_modifier, num_groups=self.num_modifier_groups)
         self.group_names = tuple(str(name) for name in group_names)
         if len(self.group_names) != self.num_modifier_groups:
             raise ValueError(
@@ -181,19 +177,9 @@ class CompositionalSpec:
         for raw_entry in raw_entries:
             token_ids = tuple(_as_int_list(raw_entry["token_ids"]))
             base_ids = tuple(_as_int_list(raw_entry["base_ids"]))
-            modifier_rows = _normalize_modifier_rows(
-                num_groups=num_groups,
-                base_ids=list(base_ids),
-                modifier_rows=raw_entry.get("modifier_rows"),
-                modifier=raw_entry.get("modifier"),
-            )
+            modifier_rows = _normalize_modifier_rows(num_groups=num_groups, base_ids=list(base_ids), modifier_rows=raw_entry.get("modifier_rows"), modifier=raw_entry.get("modifier"))
             surface = raw_entry.get("surface")
-            entry = _SequenceEntry(
-                token_ids=token_ids,
-                base_ids=base_ids,
-                modifier_rows=modifier_rows,
-                surface=str(surface) if surface is not None else None,
-            )
+            entry = _SequenceEntry(token_ids=token_ids, base_ids=base_ids, modifier_rows=modifier_rows, surface=str(surface) if surface is not None else None)
             sequence_entries.append(entry)
 
         return cls(
@@ -266,19 +252,10 @@ class CompositionalSpec:
             "runtime": {
                 "group_indices": group_indices,
                 "literal_maps": {
-                    "determiners": self._rust_literal_map(
-                        ("determiners", "article_det", "articles"),
-                        ("det_", "article_"),
-                    ),
+                    "determiners": self._rust_literal_map(("determiners", "article_det", "articles"), ("det_", "article_")),
                     "prepositions": self._rust_literal_map(("prepositions",), ("prep_",)),
-                    "prefix_punctuation": self._rust_literal_map(
-                        ("prefix_punctuation",),
-                        ("punct_prefix_",),
-                    ),
-                    "suffix_punctuation": self._rust_literal_map(
-                        ("suffix_punctuation",),
-                        ("punct_suffix_",),
-                    ),
+                    "prefix_punctuation": self._rust_literal_map(("prefix_punctuation",), ("punct_prefix_",)),
+                    "suffix_punctuation": self._rust_literal_map(("suffix_punctuation",), ("punct_suffix_",)),
                 },
                 "multi_token_first_group_indices": sorted(
                     int(group_idx)
@@ -346,12 +323,7 @@ class RustCoBPETokenizer(TokenSequenceMixin):
 
     def _encode_one_with_modifiers(self, text: str, prepend=None, append=None):
         token_ids, modifier_rows = self.rust_backend.process_text(text)
-        return self._prepend_append_rows(
-            token_ids,
-            modifier_rows,
-            prepend=prepend,
-            append=append,
-        )
+        return self._prepend_append_rows(token_ids, modifier_rows, prepend=prepend, append=append)
 
     def encode_with_modifiers(self, text, prepend=None, append=None, num_threads=8):
         if isinstance(text, str):
