@@ -190,9 +190,9 @@ class Engine:
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
         """Same as generate, but does single prefill and then clones the KV cache."""
-        if not self.token_codec.has_modifiers:
-            assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         prompt = self.tokenizer.normalize_sequence(tokens)
+        if not self.token_codec.has_modifiers:
+            assert prompt.modifiers is None and isinstance(prompt.ids, list) and all(isinstance(t, int) for t in prompt.ids), "expecting list of ints"
         compositional_mode = prompt.modifiers is not None
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
@@ -219,7 +219,7 @@ class Engine:
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
         kv_cache_prefill = KVCache(
             batch_size=1,
-            seq_len=len(tokens),
+            seq_len=len(prompt),
             device=device,
             dtype=dtype,
             **kv_model_kwargs,

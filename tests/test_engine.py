@@ -272,10 +272,16 @@ def test_generate_batch_returns_token_sequences_for_regular_bpe():
     assert len(masks[0]) == len(results[0])
 
 
-def test_regular_bpe_generate_requires_list_of_ints():
+def test_regular_bpe_generate_accepts_plain_token_sequence():
     engine = Engine(MockModel(), ByteTokenizer())
-    with pytest.raises(AssertionError, match="expecting list of ints"):
-        next(engine.generate(TokenSequence([261, 72]), max_tokens=1))
+    step, _ = next(engine.generate(TokenSequence([261, 72]), max_tokens=1))
+    assert len(step) == 1
+
+
+def test_regular_bpe_generate_rejects_modifier_sequence():
+    engine = Engine(MockModel(), ByteTokenizer())
+    with pytest.raises(ValueError, match="modifier-bearing TokenSequence"):
+        next(engine.generate(TokenSequence([261, 72], [[0], [0]]), max_tokens=1))
 
 
 def test_compositional_generate_accepts_plain_token_ids_with_default_modifiers():
