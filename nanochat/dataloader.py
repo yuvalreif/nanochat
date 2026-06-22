@@ -142,21 +142,30 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                 best_idx = -1
                 best_len = 0
                 for i, doc in enumerate(doc_buffer):
-                    doc_len = len(doc[0])
+                    doc_len = len(doc[0]) if with_modifiers else len(doc)
                     if doc_len <= remaining and doc_len > best_len:
                         best_idx = i
                         best_len = doc_len
 
                 if best_idx >= 0:
-                    doc_tokens, doc_mods = doc_buffer.pop(best_idx)
-                    doc_len = len(doc_tokens)
-                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=doc_len)
+                    doc = doc_buffer.pop(best_idx)
+                    if with_modifiers:
+                        doc_tokens, doc_mods = doc
+                        doc_len = len(doc_tokens)
+                        copy_doc_span(row_buffer, row_mod_buffer, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=doc_len)
+                    else:
+                        doc_len = len(doc)
+                        row_buffer[row_idx, pos:pos + doc_len] = torch.tensor(doc, dtype=torch.long)
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest in buffer to fill remaining and minimize waste
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i][0]))
-                    doc_tokens, doc_mods = doc_buffer.pop(shortest_idx)
-                    copy_doc_span(row_buffer, row_mod_buffer if with_modifiers else None, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=remaining)
+                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i][0]) if with_modifiers else len(doc_buffer[i]))
+                    doc = doc_buffer.pop(shortest_idx)
+                    if with_modifiers:
+                        doc_tokens, doc_mods = doc
+                        copy_doc_span(row_buffer, row_mod_buffer, row_idx=row_idx, pos=pos, token_ids=doc_tokens, modifier_rows=doc_mods, take=remaining)
+                    else:
+                        row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
                     pos += remaining
 
         # Copy to pinned CPU buffer, then single HtoD transfer

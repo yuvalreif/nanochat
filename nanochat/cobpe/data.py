@@ -32,8 +32,7 @@ def encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with
             out.append((token_ids, modifier_rows))
         return out
 
-    token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-    return [(tokens, None) for tokens in token_lists]
+    return tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
 
 
 def copy_doc_span(row_buffer, row_mod_buffer, *, row_idx, pos, token_ids, modifier_rows, take):
