@@ -20,7 +20,7 @@ import torch
 import pyarrow.parquet as pq
 
 from nanochat.common import get_dist_info
-from nanochat.dataloader_utils import copy_doc_span, encode_doc_batch, resolve_num_modifier_groups
+from nanochat.cobpe.data import copy_doc_span, encode_doc_batch, resolve_num_modifier_groups
 from nanochat.dataset import list_parquet_files
 
 

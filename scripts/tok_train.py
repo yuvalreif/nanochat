@@ -7,7 +7,7 @@ import time
 import argparse
 import torch
 from nanochat.tokenizer import RustBPETokenizer
-from nanochat.cobpe_tokenizer_train import (
+from nanochat.cobpe.training import (
     normalize_cobpe_training_text,
     save_cobpe_metadata,
     train_cobpe_tokenizer,

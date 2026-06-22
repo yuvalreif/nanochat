@@ -1,9 +1,12 @@
-"""Small helpers for tokenizing dataloaders."""
+"""Modifier-stream operations used by nanochat dataloaders."""
 
 import torch
 
+from nanochat.token_codec import normalize_token_sequence
+
 
 def resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
+    """Validate the CoBPE dataloader mode and return its modifier width."""
     if not with_modifiers:
         return 0
     if not (hasattr(tokenizer, "has_compositional_mode") and tokenizer.has_compositional_mode()):
@@ -18,7 +21,9 @@ def resolve_num_modifier_groups(tokenizer, *, with_modifiers: bool) -> int:
 
 
 def encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with_modifiers):
-    encoded = tokenizer.encode_sequences(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+    """Encode documents into structured sequences for the packing buffer."""
+    encoded = tokenizer(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+    encoded = [normalize_token_sequence(tokenizer, tokens) for tokens in encoded]
     if with_modifiers:
         for seq in encoded:
             if seq.modifiers is None:
@@ -27,6 +32,7 @@ def encode_doc_batch(tokenizer, doc_batch, *, bos_token, tokenizer_threads, with
 
 
 def copy_doc_span(row_buffer, row_mod_buffer, *, row_idx, pos, doc, take):
+    """Copy matching base-token and modifier spans into a packed row."""
     row_buffer[row_idx, pos:pos + take] = torch.tensor(doc.ids[:take], dtype=torch.long)
     if row_mod_buffer is not None:
         if doc.modifiers is None:

@@ -1,9 +1,9 @@
 """
-Rustbpe-backed compositional tokenizer bridge.
+Rustbpe-backed CoBPE tokenizer bridge.
 
 This module keeps the Python side very small:
 - try to load the packaged Rust tokenizer
-- pass a compact JSON config derived from compositional metadata
+- pass a compact JSON config derived from CoBPE metadata
 - normalize the returned ids / modifier rows
 """
 

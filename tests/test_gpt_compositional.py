@@ -90,9 +90,9 @@ def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
         raise AssertionError("parameter not found in optimizer groups")
 
     modifier_params = [
-        model.modifier_embed.weight,
-        model.modifier_logit_refine_fc.weight,
-        model.modifier_logit_refine_out.weight,
+        model.cobpe.embed.weight,
+        model.cobpe.refine_fc.weight,
+        model.cobpe.refine_out.weight,
     ]
     for param in modifier_params:
         group = group_for(param)

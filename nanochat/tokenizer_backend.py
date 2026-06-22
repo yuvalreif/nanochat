@@ -1,36 +1,8 @@
-"""Tokenizer utility helpers kept out of the core tokenizer wrappers."""
-
-import re
+"""Build a Hugging Face tokenizer backend from rustbpe merge ranks."""
 
 from tokenizers import Tokenizer as HFTokenizer
 from tokenizers import pre_tokenizers, decoders, Regex
 from tokenizers.models import BPE
-
-
-NORMALIZED_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|\p{L}+|\p{N}{1,2}|[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-WORD_PATTERN = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
-PUNCT_TO_WORD_BOUNDARY_PATTERN = re.compile(r"([^\w\s])(?=\w)")
-WORD_TO_PUNCT_BOUNDARY_PATTERN = re.compile(r"(?<=\w)([^\w\s])")
-
-
-def lowercase_standard_capitalization(text: str) -> str:
-    def _replace(match: re.Match) -> str:
-        word = match.group(0)
-        if len(word) >= 2 and word[0].isupper() and word[1:].islower():
-            return word.lower()
-        return word
-
-    return WORD_PATTERN.sub(_replace, text)
-
-
-def separate_affix_punctuation(text: str) -> str:
-    text = PUNCT_TO_WORD_BOUNDARY_PATTERN.sub(r"\1 ", text)
-    text = WORD_TO_PUNCT_BOUNDARY_PATTERN.sub(r" \1", text)
-    return text
-
-
-def apply_space_cap_normalization(text: str) -> str:
-    return lowercase_standard_capitalization(separate_affix_punctuation(text))
 
 
 def _token_bytes_to_string(token_bytes: bytes) -> str:

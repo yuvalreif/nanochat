@@ -1,4 +1,10 @@
-"""Common token sequence interface for regular BPE and CoBPE."""
+"""
+Common token sequence interface for regular BPE and CoBPE.
+
+Regular BPE identifies a token with one integer. CoBPE uses the same base-token
+integer plus one modifier value from each configured group. TokenSequence keeps
+those parallel values together once code needs to work with either tokenizer.
+"""
 
 from __future__ import annotations
 
@@ -83,6 +89,7 @@ def decode_token_sequence(tokenizer, sequence) -> str:
 
 
 class TokenSequenceMixin:
+    """Add structured sequence helpers without changing a tokenizer's BPE API."""
     def has_compositional_mode(self) -> bool:
         return False
 
@@ -107,12 +114,14 @@ class TokenSequenceMixin:
 
 @dataclass(frozen=True)
 class TokenItem:
+    """One generated base token and its optional CoBPE modifier values."""
     id: int
     modifier: list[int] | None = None
 
 
 @dataclass
 class TokenSequence:
+    """A token-id sequence with optional modifier values at every position."""
     ids: list[int]
     modifiers: list[list[int]] | None = None
 
@@ -186,6 +195,7 @@ class TokenSequence:
 
 @dataclass
 class TokenStep:
+    """A batch of tokens sampled at one autoregressive generation step."""
     ids: list[int]
     modifiers: list[list[int]] | None = None
 
@@ -221,6 +231,7 @@ class TokenStep:
 
 
 class TokenCodec:
+    """Convert tokenizer outputs and generation state to the common sequence form."""
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.has_modifiers = tokenizer_has_modifiers(tokenizer)

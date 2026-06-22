@@ -2,8 +2,8 @@ import math
 
 import torch
 
-from nanochat.compositional import CompositionalSpec
-from nanochat.compositional_bpb import compositional_target_bytes
+from nanochat.cobpe.tokenizer import CompositionalSpec
+from nanochat.cobpe.bpb import compositional_target_bytes
 from nanochat.loss_eval import evaluate_bpb
 
 

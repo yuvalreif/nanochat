@@ -6,17 +6,13 @@ TODOs:
 - All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
 """
 import random
+from dataclasses import dataclass
 
 from jinja2 import Template
 import torch
 import torch.distributed as dist
-from nanochat.core_eval_utils import (
-    find_changed_token_span,
-    find_strict_prefix_span,
-    forward_model,
-    option_mean_loss_with_suffix_boundary_rule,
-)
-from nanochat.token_codec import stack_token_sequences
+from nanochat.cobpe.eval import find_changed_token_span, option_mean_loss_with_suffix_boundary_rule
+from nanochat.token_codec import TokenSequence, normalize_token_sequence, stack_token_sequences
 
 # -----------------------------------------------------------------------------
 # Prompt rendering utilities
@@ -108,16 +104,25 @@ def find_common_length(token_sequences, direction='left'):
     return min_len
 
 
-def _encode_prompts(tokenizer, prompts):
-    bos_token_id = tokenizer.get_bos_token_id()
-    return tokenizer.encode_sequences(prompts, prepend=bos_token_id)
+def stack_sequences(tokens, pad_token_id):
+    """Stack up a list of token sequences, pad to longest on the right"""
+    bsz, seq_len = len(tokens), max(len(x) for x in tokens)
+    input_ids = torch.full((bsz, seq_len), pad_token_id, dtype=torch.long)
+    for i, x in enumerate(tokens):
+        input_ids[i, :len(x)] = torch.tensor(x, dtype=torch.long)
+    return input_ids
+
+
+def _token_units(tokens):
+    """Return complete token identities, including CoBPE modifiers when present."""
+    return tokens.units() if isinstance(tokens, TokenSequence) else tokens
 
 
 def batch_sequences_mc(tokenizer, prompts):
     # In multiple choice, contexts are the same but the continuation is different (common prefix)
-    tokens = _encode_prompts(tokenizer, prompts)
+    tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
     # figure out the start and end of each continuation
-    answer_start_idx = find_common_length([seq.units() for seq in tokens], direction='left')
+    answer_start_idx = find_common_length([_token_units(seq) for seq in tokens], direction='left')
     start_indices = [answer_start_idx] * len(prompts)
     end_indices = [len(x) for x in tokens]
     return tokens, start_indices, end_indices
@@ -125,9 +130,9 @@ def batch_sequences_mc(tokenizer, prompts):
 
 def batch_sequences_schema(tokenizer, prompts):
     # In schema tasks, contexts vary but continuation is the same (common suffix)
-    tokens = _encode_prompts(tokenizer, prompts)
+    tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
     # figure out the start and end of each context
-    suffix_length = find_common_length([seq.units() for seq in tokens], direction='right')
+    suffix_length = find_common_length([_token_units(seq) for seq in tokens], direction='right')
     end_indices = [len(x) for x in tokens]
     start_indices = [ei - suffix_length for ei in end_indices]
     return tokens, start_indices, end_indices
@@ -135,14 +140,80 @@ def batch_sequences_schema(tokenizer, prompts):
 
 def batch_sequences_lm(tokenizer, prompts):
     # In LM tasks, we have two prompts: without and with continuation
-    tokens = _encode_prompts(tokenizer, prompts)
+    tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
     tokens_without, tokens_with = tokens
-    if tokens_without.modifiers is None and tokens_with.modifiers is None:
-        start_idx, end_idx = find_strict_prefix_span(tokens_without.ids, tokens_with.ids)
-    else:
+    if isinstance(tokens_without, TokenSequence) and tokens_without.modifiers is not None:
+        # CoBPE can retokenize the word at the continuation boundary, so score the changed span.
         start_idx, end_idx = find_changed_token_span(tokens_without.ids, tokens_with.ids, prompts)
+    else:
+        start_idx, end_idx = len(tokens_without), len(tokens_with)
+        assert start_idx < end_idx, "prompt without is supposed to be a prefix of prompt with"
+        assert tokens_without == tokens_with[:start_idx], "prompt without is supposed to be a prefix of prompt with"
     # we only need the with continuation prompt in the LM task, i.e. batch size of 1
     return [tokens_with], [start_idx], [end_idx]
+
+
+@dataclass
+class ForwardOutput:
+    losses: torch.Tensor
+    predictions: torch.Tensor
+    modifier_predictions: torch.Tensor | None = None
+    modifier_group_losses: list[torch.Tensor] | None = None
+
+
+def _modifier_predictions(model, hidden, prediction_base_ids):
+    modifier_logits = model.get_modifier_logits(hidden, prediction_base_ids)
+    return torch.stack([group_logits.argmax(dim=-1) for group_logits in modifier_logits], dim=-1)
+
+
+def _modifier_losses(model, hidden, target_ids, target_modifier_ids, batch_size, seq_len):
+    modifier_logits = model.get_modifier_logits(hidden, target_ids)
+    modifier_loss = None
+    modifier_group_losses = []
+    for group_idx, group_logits in enumerate(modifier_logits):
+        group_loss = torch.nn.functional.cross_entropy(
+            group_logits.view(batch_size * seq_len, -1),
+            target_modifier_ids[..., group_idx].reshape(batch_size * seq_len),
+            reduction='none',
+        ).view(batch_size, seq_len)
+        modifier_group_losses.append(group_loss)
+        modifier_loss = group_loss if modifier_loss is None else modifier_loss + group_loss
+    return modifier_loss, modifier_group_losses
+
+
+@torch.no_grad()
+def forward_model(model, input_ids, modifier_ids=None):
+    """
+    Take BxT token tensors and return per-position losses and argmax predictions.
+    For CoBPE, each position's loss is the base-token loss plus the losses of its
+    modifier groups. The last column is nan because it has no autoregressive target.
+    """
+    batch_size, seq_len = input_ids.size()
+    if modifier_ids is None:
+        outputs = model(input_ids)
+        modifier_predictions = None
+        modifier_group_losses = None
+    else:
+        outputs, hidden = model(input_ids, modifier_ids=modifier_ids, return_hidden=True)
+        prediction_base_ids = outputs.argmax(dim=-1)
+        modifier_predictions = _modifier_predictions(model, hidden, prediction_base_ids)
+    # Roll the tensor to the left by one position to get the (autoregressive) target ids
+    target_ids = torch.roll(input_ids, shifts=-1, dims=1)
+    # Calculate cross entropy at all positions
+    losses = torch.nn.functional.cross_entropy(
+        outputs.view(batch_size * seq_len, -1),
+        target_ids.view(batch_size * seq_len),
+        reduction='none'
+    ).view(batch_size, seq_len)
+    if modifier_ids is not None:
+        target_modifier_ids = torch.roll(modifier_ids, shifts=-1, dims=1)
+        modifier_loss, modifier_group_losses = _modifier_losses(model, hidden, target_ids, target_modifier_ids, batch_size, seq_len)
+        losses = losses + modifier_loss
+    # Set the last column to be nan because there is no autoregressive loss there
+    losses[:, -1] = float('nan')
+    # Get the argmax predictions at each position
+    predictions = outputs.argmax(dim=-1)
+    return ForwardOutput(losses, predictions, modifier_predictions, modifier_group_losses)
 
 
 @torch.no_grad()
@@ -182,7 +253,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         for t, s, e in zip(tokens, start_idxs, end_idxs):
             if len(t) > max_tokens:
                 num_to_crop = len(t) - max_tokens
-                new_tokens.append(t.slice(-max_tokens)) # take the last max_tokens tokens
+                new_tokens.append(t.slice(-max_tokens) if isinstance(t, TokenSequence) else t[-max_tokens:]) # take the last max_tokens tokens
                 new_start_idxs.append(s - num_to_crop) # shift the indices down
                 new_end_idxs.append(e - num_to_crop)
                 assert s - num_to_crop >= 0, "this should never happen right?"
@@ -195,14 +266,19 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
 
     # Stack up all the sequences into a batch
     pad_token_id = tokenizer.get_bos_token_id() # use BOS as pad token is ok
-    default_modifier = tokenizer.get_default_modifier() if any(seq.modifiers is not None for seq in tokens) else None
-    input_ids, input_modifier_ids = stack_token_sequences(tokens, pad_token_id, default_modifier)
+    has_modifiers = any(isinstance(seq, TokenSequence) and seq.modifiers is not None for seq in tokens)
+    if has_modifiers:
+        tokens = [normalize_token_sequence(tokenizer, seq) for seq in tokens]
+        input_ids, input_modifier_ids = stack_token_sequences(tokens, pad_token_id, tokenizer.get_default_modifier())
+    else:
+        input_ids = stack_sequences(tokens, pad_token_id)
+        input_modifier_ids = None
     input_ids = input_ids.to(device)
     if input_modifier_ids is not None:
         input_modifier_ids = input_modifier_ids.to(device)
 
     # Forward the model, get the autoregressive loss and argmax prediction at each token
-    forward = forward_model(model, input_ids, input_modifier_ids)
+    model_output = forward_model(model, input_ids, input_modifier_ids)
 
     # See if the losses/predictions come out correctly
     if task_type == 'language_modeling':
@@ -210,27 +286,26 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         si = start_idxs[0]
         ei = end_idxs[0]
         # predictions[i] predict input_ids[i+1] autoregressively
-        predicted_tokens = forward.predictions[0, si-1:ei-1]
+        predicted_tokens = model_output.predictions[0, si-1:ei-1]
         actual_tokens = input_ids[0, si:ei]
         is_correct = torch.all(predicted_tokens == actual_tokens).item()
-        if is_correct and forward.modifier_predictions is not None:
-            predicted_modifiers = forward.modifier_predictions[0, si-1:ei-1]
+        if is_correct and model_output.modifier_predictions is not None:
+            predicted_modifiers = model_output.modifier_predictions[0, si-1:ei-1]
             actual_modifiers = input_modifier_ids[0, si:ei]
             is_correct = torch.all(predicted_modifiers == actual_modifiers).item()
     elif task_type in ['multiple_choice', 'schema']:
         # For MC/schema: find the option with lowest average loss
-        mean_losses = [
-            option_mean_loss_with_suffix_boundary_rule(
-                forward.losses,
-                forward.modifier_group_losses,
-                input_modifier_ids,
-                tokenizer,
-                i,
-                si,
-                ei,
-            )
-            for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))
-        ]
+        if model_output.modifier_group_losses is None:
+            mean_losses = [model_output.losses[i, si-1:ei-1].mean().item()
+                           for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))]
+        else:
+            mean_losses = [
+                option_mean_loss_with_suffix_boundary_rule(
+                    model_output.losses, model_output.modifier_group_losses, input_modifier_ids,
+                    tokenizer, i, si, ei,
+                )
+                for i, (si, ei) in enumerate(zip(start_idxs, end_idxs))
+            ]
         pred_idx = mean_losses.index(min(mean_losses))
         is_correct = pred_idx == item['gold']
     else:

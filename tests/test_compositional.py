@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from nanochat.compositional import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
+from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanochat.token_codec import TokenItem, TokenSequence
 
@@ -153,7 +153,7 @@ def _simple_spec():
 
 
 def test_rust_cobpe_tokenizer_delegates_to_rust_backend(monkeypatch):
-    from nanochat import compositional as compositional_mod
+    from nanochat.cobpe import tokenizer as compositional_mod
 
     monkeypatch.setattr(compositional_mod, "build_rust_backend", lambda spec, tokenizer_dir=None: MockBackend())
 
@@ -170,8 +170,12 @@ def test_rust_cobpe_tokenizer_delegates_to_rust_backend(monkeypatch):
 
     seq = tokenizer.encode_sequence("ab", prepend=tokenizer.get_bos_token_id())
     batch_seq = tokenizer.encode_sequences(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
+    called_seq = tokenizer("ab", prepend=tokenizer.get_bos_token_id())
+    called_batch = tokenizer(["ab", "ab"], prepend=tokenizer.get_bos_token_id())
     assert seq == TokenSequence([99, 12], [[0, 0], [2, 0]])
     assert batch_seq == [seq, seq]
+    assert called_seq == seq
+    assert called_batch == batch_seq
     assert tokenizer.decode_sequence(TokenSequence([12], [[2, 0]])) == "AB"
     assert tokenizer.empty_sequence() == TokenSequence([], [])
     assert tokenizer.token_item(99) == TokenItem(99, [0, 0])
@@ -183,7 +187,7 @@ def test_rust_cobpe_tokenizer_requires_rust_backend():
 
 
 def test_get_tokenizer_loads_compositional_metadata(tmp_path, monkeypatch):
-    from nanochat import compositional as compositional_mod
+    from nanochat.cobpe import tokenizer as compositional_mod
     from nanochat import tokenizer as tokenizer_mod
 
     tokenizer_dir = tmp_path / "tokenizer"
@@ -226,7 +230,7 @@ def test_dataloader_with_modifiers_yields_modifier_batches(monkeypatch):
         def get_num_modifier_groups(self):
             return 1
 
-        def encode_sequences(self, texts, prepend=None, append=None, num_threads=8):
+        def __call__(self, texts, prepend=None, append=None, num_threads=8):
             assert prepend == 99
             return [
                 TokenSequence([99, 10, 11], [[0], [1], [2]])

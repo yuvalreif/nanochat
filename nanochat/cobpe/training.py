@@ -2,19 +2,34 @@
 
 import json
 import os
+import re
 import rustbpe
 import tiktoken
 
-from nanochat.compositional import build_cobpe_metadata
+from nanochat.cobpe.tokenizer import build_cobpe_metadata
 from nanochat.tokenizer import RustBPETokenizer, SPECIAL_TOKENS
-from nanochat.tokenizer_utils import NORMALIZED_SPLIT_PATTERN, apply_space_cap_normalization
-
-
 COBPE_VOCAB_BUFFER_SIZE = 512
+NORMALIZED_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|\p{L}+|\p{N}{1,2}|[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
+WORD_PATTERN = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
+PUNCT_TO_WORD_BOUNDARY_PATTERN = re.compile(r"([^\w\s])(?=\w)")
+WORD_TO_PUNCT_BOUNDARY_PATTERN = re.compile(r"(?<=\w)([^\w\s])")
+
+
+def _lowercase_standard_capitalization(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        word = match.group(0)
+        return word.lower() if len(word) >= 2 and word[0].isupper() and word[1:].islower() else word
+    return WORD_PATTERN.sub(replace, text)
+
+
+def _separate_affix_punctuation(text: str) -> str:
+    text = PUNCT_TO_WORD_BOUNDARY_PATTERN.sub(r"\1 ", text)
+    return WORD_TO_PUNCT_BOUNDARY_PATTERN.sub(r" \1", text)
 
 
 def normalize_cobpe_training_text(text: str) -> str:
-    return apply_space_cap_normalization(text)
+    """Expose spaces, standard capitalization, and punctuation as modifiers."""
+    return _lowercase_standard_capitalization(_separate_affix_punctuation(text))
 
 
 def train_normalized_space_cap_tokenizer(text_iterator, vocab_size):

@@ -10,9 +10,9 @@ import os
 import copy
 from functools import lru_cache
 
-from nanochat.compositional import CompositionalSpec, RustCoBPETokenizer
+from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer
 from nanochat.token_codec import TokenSequenceMixin
-from nanochat.tokenizer_utils import build_backend_tokenizer
+from nanochat.tokenizer_backend import build_backend_tokenizer
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents

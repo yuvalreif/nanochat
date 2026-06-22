@@ -1,4 +1,9 @@
-"""CoBPE metadata helpers and Rust-backed tokenizer wrapper."""
+"""CoBPE modifier metadata and the Rust-backed tokenizer wrapper.
+
+CoBPE represents each surface token as a regular BPE token id plus one value
+from each modifier group. The modifier groups encode reusable transformations
+such as a leading space, capitalization, a determiner, or punctuation.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from nanochat.compositional_rust import build_rust_backend
+from nanochat.cobpe.runtime import build_rust_backend
 from nanochat.token_codec import TokenSequenceMixin
 
 
@@ -290,7 +295,7 @@ class CompositionalSpec:
 
 
 class RustCoBPETokenizer(TokenSequenceMixin):
-    """Rust-backed CoBPE tokenizer wrapper."""
+    """Expose CoBPE tokenization while delegating the base vocabulary to rustbpe."""
 
     def __init__(self, base_tokenizer, spec: CompositionalSpec, *, tokenizer_dir: Optional[str] = None):
         self.base_tokenizer = base_tokenizer
@@ -357,6 +362,14 @@ class RustCoBPETokenizer(TokenSequenceMixin):
                 self._prepend_append_rows(token_ids, modifier_rows, prepend=prepend, append=append)
                 for token_ids, modifier_rows in encoded
             ]
+        raise ValueError(f"Invalid input type: {type(text)}")
+
+    def __call__(self, text, *args, **kwargs):
+        """Encode text into TokenSequence objects carrying base ids and modifiers."""
+        if isinstance(text, str):
+            return self.encode_sequence(text, *args, **kwargs)
+        if isinstance(text, list):
+            return self.encode_sequences(text, *args, **kwargs)
         raise ValueError(f"Invalid input type: {type(text)}")
 
     def decode_token_with_modifiers(self, token_id: int, modifier_row: Iterable[Any]) -> str:

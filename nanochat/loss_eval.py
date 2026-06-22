@@ -5,7 +5,7 @@ import math
 import torch
 import torch.distributed as dist
 
-from nanochat.compositional_bpb import (
+from nanochat.cobpe.bpb import (
     compositional_joint_nll_sum_groups,
     compositional_target_bytes,
     target_counted_mask,

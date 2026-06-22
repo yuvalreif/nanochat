@@ -22,6 +22,7 @@ def _space_value_adds_prefix_space(value_name: str, rel_idx: int, default_idx: i
 
 
 def build_compositional_bpb_tables(tokenizer, token_bytes, *, device):
+    """Cache additive byte deltas for modifier values supported by the fast path."""
     spec = getattr(tokenizer, "spec", None)
     if spec is None:
         return None, None, None, None
@@ -115,6 +116,7 @@ def unpack_eval_batch(batch):
 
 
 def modified_utf8_lengths(tokenizer, token_ids, modifier_rows):
+    """Decode modifier combinations that cannot be counted with additive deltas."""
     if hasattr(tokenizer, "utf8_len_with_modifiers_batch"):
         return tokenizer.utf8_len_with_modifiers_batch(token_ids, modifier_rows)
     if hasattr(tokenizer, "decode_token_with_modifiers"):
@@ -129,6 +131,12 @@ def modified_utf8_lengths(tokenizer, token_ids, modifier_rows):
 
 
 def compositional_target_bytes(y, y_mods, token_bytes, tokenizer):
+    """
+    Return the decoded UTF-8 byte count for each CoBPE target.
+
+    A non-default modifier reconstructs the surface from a base token with leading
+    ASCII spaces removed. Default rows preserve the complete base-token surface.
+    """
     if tokenizer is None:
         raise ValueError("Compositional BPB evaluation requires a tokenizer.")
     y_flat = y.view(-1)
@@ -170,6 +178,7 @@ def compositional_target_bytes(y, y_mods, token_bytes, tokenizer):
 
 
 def compositional_joint_nll_sum_groups(model, x, y, x_mods, y_mods):
+    """Return base-token NLL plus the NLL of every modifier group."""
     base_loss = model(x, y, modifier_ids=x_mods, loss_reduction='none').view_as(y)
     hidden = model(x, modifier_ids=x_mods, return_hidden_only=True)
     batch_size, seq_len = y.shape
