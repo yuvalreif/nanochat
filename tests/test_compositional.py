@@ -2,8 +2,34 @@ import json
 
 import pytest
 
-from nanochat.compositional import CompositionalSpec, CompositionalTokenizer
+from nanochat.compositional import CompositionalSpec, CompositionalTokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
+
+
+def test_build_cobpe_metadata_is_complete_and_json_serializable():
+    payload = build_cobpe_metadata()
+    json.dumps(payload)
+    spec = CompositionalSpec.from_dict(payload)
+
+    assert spec.group_names == (
+        "space_prefix",
+        "base_capitalization",
+        "determiners",
+        "article_capitalization",
+        "prepositions",
+        "prep_capitalization",
+        "prefix_punctuation",
+        "suffix_punctuation",
+    )
+    assert spec.default_modifier == (0,) * len(spec.group_names)
+    assert "det_the" in spec.group_value_names["determiners"]
+    assert "prep_on" in spec.group_value_names["prepositions"]
+    assert "punct_suffix_." in spec.group_value_names["suffix_punctuation"]
+
+    modifier = list(spec.default_modifier)
+    suffix_idx = spec.group_to_idx["suffix_punctuation"]
+    modifier[suffix_idx] = spec.group_value_names["suffix_punctuation"].index("punct_suffix_.")
+    assert spec.surface_for_token(10, modifier, lambda _ids: " dog") == "dog."
 
 
 class ToyTokenizer:
@@ -351,28 +377,7 @@ def test_compositional_python_path_detaches_raw_function_words_without_duplicati
                 8: ".",
             },
         ),
-        CompositionalSpec.from_dict(
-            {
-                "version": 1,
-                "num_modifier_groups": 5,
-                "group_names": [
-                    "space_prefix",
-                    "determiners",
-                    "article_capitalization",
-                    "prepositions",
-                    "suffix_punctuation",
-                ],
-                "group_value_names": {
-                    "space_prefix": ["no_space_prefix", "with_space_prefix"],
-                    "determiners": ["no_determiner", "det_the"],
-                    "article_capitalization": ["no_article_cap", "add_article_cap"],
-                    "prepositions": ["no_preposition", "prep_on"],
-                    "suffix_punctuation": ["no_suffix", "punct_suffix_."],
-                },
-                "default_modifier": [0, 0, 0, 0, 0],
-                "entries": [],
-            }
-        ),
+        CompositionalSpec.from_dict(build_cobpe_metadata()),
     )
 
     token_ids, modifier_rows = tokenizer.encode_with_modifiers("The cat sat on the mat.")

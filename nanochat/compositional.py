@@ -33,6 +33,50 @@ MULTI_TOKEN_FIRST_GROUPS = {
     "prefix_punctuation",
 }
 
+COBPE_DETERMINERS = (
+    "the", "a", "an",
+    "my", "your", "his", "her", "our", "their", "its",
+)
+COBPE_PREPOSITIONS = ("by", "at", "of", "to", "in", "on", "with", "for", "from")
+COBPE_PREFIX_PUNCTUATION = (
+    "'", "\u2018", "\u2019", '"', "\u201c", "\u201d", "`", "(", "[", "{", "-",
+)
+COBPE_SUFFIX_PUNCTUATION = (
+    "'", "\u2018", "\u2019", '"', "\u201c", "\u201d", "`",
+    ")", "]", "}", ".", "!", "?", ",", ";", ":", "-", "'s", "s'",
+)
+
+
+def build_cobpe_metadata() -> dict[str, Any]:
+    """Return the canonical metadata used by nanochat's CoBPE tokenizer mode."""
+    group_value_names = {
+        "space_prefix": ["no_space_prefix", "with_space_prefix"],
+        "base_capitalization": ["no_capitalization", "add_capitalization"],
+        "determiners": ["no_det", *(f"det_{value}" for value in COBPE_DETERMINERS)],
+        "article_capitalization": ["no_article_cap", "add_article_cap"],
+        "prepositions": ["no_prep", *(f"prep_{value}" for value in COBPE_PREPOSITIONS)],
+        "prep_capitalization": ["no_prep_cap", "add_prep_cap"],
+        "prefix_punctuation": [
+            "no_prefix_punct",
+            *(f"punct_prefix_{value}" for value in COBPE_PREFIX_PUNCTUATION),
+        ],
+        "suffix_punctuation": [
+            "no_suffix_punct",
+            *(f"punct_suffix_{value}" for value in COBPE_SUFFIX_PUNCTUATION),
+        ],
+    }
+    group_names = list(group_value_names)
+    return {
+        "version": 1,
+        "group_names": group_names,
+        "group_value_names": group_value_names,
+        "num_modifier_groups": len(group_names),
+        "modifier_group_sizes": [len(group_value_names[name]) for name in group_names],
+        "default_modifier": [0] * len(group_names),
+        "entries": [],
+        "inverse_entries": [],
+    }
+
 
 def _as_int_list(values: Iterable[Any]) -> list[int]:
     return [int(v) for v in values]
