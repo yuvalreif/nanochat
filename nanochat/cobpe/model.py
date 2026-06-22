@@ -44,6 +44,14 @@ class CoBPEModule(nn.Module):
         torch.nn.init.normal_(self.embed.weight, mean=0.0, std=0.8)
         torch.nn.init.normal_(self.refine_fc.weight, mean=0.0, std=0.001)
         torch.nn.init.normal_(self.refine_out.weight, mean=0.0, std=0.001)
+        # Default modifier value is 0 in each group, so it starts as no extra
+        # input signal. Padded rows should never affect training.
+        if self.group_offsets:
+            default_ids = torch.tensor(self.group_offsets, dtype=torch.long, device=self.embed.weight.device)
+            self.embed.weight.index_fill_(0, default_ids, 0.0)
+        if self.padded_total_size > self.total_size:
+            self.embed.weight[self.total_size:].zero_()
+            self.refine_out.weight[self.total_size:].zero_()
 
     def _offset_ids(self, modifier_ids):
         if modifier_ids.dim() != 3:
@@ -94,6 +102,6 @@ class CoBPEModule(nn.Module):
         for group_idx, group_logits in enumerate(self.logits(hidden, safe_targets, base_unembedding)):
             group_targets = target_modifier_ids[..., group_idx].long()
             group_targets = torch.where(valid_targets, group_targets, torch.full_like(group_targets, -1))
-            group_loss = F.cross_entropy(group_logits.view(-1, group_logits.size(-1)), group_targets.reshape(-1), ignore_index=-1, reduction=loss_reduction)
+            group_loss = F.cross_entropy(group_logits.float().view(-1, group_logits.size(-1)), group_targets.reshape(-1), ignore_index=-1, reduction=loss_reduction)
             modifier_loss = group_loss if modifier_loss is None else modifier_loss + group_loss
         return modifier_loss

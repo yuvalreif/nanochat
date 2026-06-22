@@ -516,6 +516,8 @@ class GPT(nn.Module):
             modifier_loss = self._modifier_loss(x, targets, target_modifier_ids, loss_reduction)
             if modifier_loss is not None:
                 loss = loss + float(self.config.modifier_loss_weight) * modifier_loss
+            if return_hidden:
+                return loss, x
             return loss
         else:
             # inference: just return the logits directly

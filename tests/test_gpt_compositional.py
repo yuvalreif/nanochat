@@ -77,6 +77,10 @@ def test_gpt_compositional_pads_modifier_tables_for_ddp_sharding():
     assert model.cobpe.padded_total_size == 64
     assert model.cobpe.embed.weight.shape == (64, model.config.n_embd)
     assert model.cobpe.refine_out.weight.shape[0] == 64
+    assert torch.equal(model.cobpe.embed.weight[0], torch.zeros_like(model.cobpe.embed.weight[0]))
+    assert torch.equal(model.cobpe.embed.weight[31], torch.zeros_like(model.cobpe.embed.weight[31]))
+    assert torch.equal(model.cobpe.embed.weight[61:], torch.zeros_like(model.cobpe.embed.weight[61:]))
+    assert torch.equal(model.cobpe.refine_out.weight[61:], torch.zeros_like(model.cobpe.refine_out.weight[61:]))
 
     ids = torch.randint(0, 32, (2, 8), dtype=torch.long)
     modifier_ids = torch.stack(

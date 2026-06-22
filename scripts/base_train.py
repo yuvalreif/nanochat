@@ -338,6 +338,10 @@ if scaler is not None:
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
+loader_kwargs = {}
+if compositional_mode:
+    loader_kwargs = dict(tokenizer_threads=16, tokenizer_batch_size=1024, buffer_size=8000)
+    print0(f"CoBPE dataloader tokenization: {loader_kwargs['tokenizer_threads']} threads, batches of {loader_kwargs['tokenizer_batch_size']}, buffer {loader_kwargs['buffer_size']}")
 train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
     tokenizer,
     args.device_batch_size,
@@ -346,6 +350,7 @@ train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(
     device=device,
     resume_state_dict=dataloader_resume_state_dict,
     with_modifiers=compositional_mode,
+    **loader_kwargs,
 )
 build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
     tokenizer,
@@ -354,6 +359,7 @@ build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
     split="val",
     device=device,
     with_modifiers=compositional_mode,
+    **loader_kwargs,
 )
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 

@@ -24,6 +24,7 @@ class MockEvalModel:
         loss_reduction="mean",
         modifier_ids=None,
         target_modifier_ids=None,
+        return_hidden=False,
         return_hidden_only=False,
     ):
         if return_hidden_only:
@@ -39,7 +40,10 @@ class MockEvalModel:
         )
         assert targets is not None
         assert loss_reduction == "none"
-        return torch.full(targets.shape, self.loss_value, dtype=torch.float32)
+        loss = torch.full(targets.shape, self.loss_value, dtype=torch.float32)
+        if return_hidden:
+            return loss, torch.zeros((*input_ids.shape, 1), dtype=torch.float32)
+        return loss
 
     def get_modifier_logits(self, hidden, safe_targets):
         return [

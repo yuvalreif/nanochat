@@ -175,8 +175,14 @@ def compositional_target_bytes(y, y_mods, token_bytes, tokenizer):
 
 def compositional_joint_nll_sum_groups(model, x, y, x_mods, y_mods):
     """Return base-token NLL plus the NLL of every modifier group."""
-    base_loss = model(x, y, modifier_ids=x_mods, loss_reduction='none').view_as(y)
-    hidden = model(x, modifier_ids=x_mods, return_hidden_only=True)
+    try:
+        base_loss, hidden = model(x, y, modifier_ids=x_mods, loss_reduction='none', return_hidden=True)
+    except TypeError as exc:
+        if "return_hidden" not in str(exc):
+            raise
+        base_loss = model(x, y, modifier_ids=x_mods, loss_reduction='none')
+        hidden = model(x, modifier_ids=x_mods, return_hidden_only=True)
+    base_loss = base_loss.view_as(y)
     batch_size, seq_len = y.shape
     valid_targets = y >= 0
     safe_targets = torch.where(valid_targets, y, torch.zeros_like(y))
@@ -186,6 +192,6 @@ def compositional_joint_nll_sum_groups(model, x, y, x_mods, y_mods):
     for group_idx, group_logits in enumerate(modifier_logits):
         group_targets = y_mods[..., group_idx].long()
         group_targets = torch.where(valid_targets, group_targets, torch.full_like(group_targets, -1))
-        group_loss = F.cross_entropy(group_logits.view(batch_size * seq_len, -1), group_targets.reshape(batch_size * seq_len), ignore_index=-1, reduction="none").view(batch_size, seq_len)
+        group_loss = F.cross_entropy(group_logits.float().view(batch_size * seq_len, -1), group_targets.reshape(batch_size * seq_len), ignore_index=-1, reduction="none").view(batch_size, seq_len)
         modifier_loss_sum = modifier_loss_sum + group_loss
     return base_loss + modifier_loss_sum
