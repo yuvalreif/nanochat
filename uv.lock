@@ -1530,7 +1530,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.117.1" },
     { name = "kernels", specifier = ">=0.11.7" },
     { name = "psutil", specifier = ">=7.1.0" },
-    { name = "rustbpe", git = "https://github.com/yuvalreif/rustbpe.git?rev=50d0fb1eedd7e24097a26be40a48e71b03392bc7" },
+    { name = "rustbpe", git = "https://github.com/yuvalreif/rustbpe.git?rev=aa041b83d643e73700b8b56499fcd7ebafd9a0f2" },
     { name = "setuptools", marker = "extra == 'cpu'", specifier = ">=65.0.0" },
     { name = "tiktoken", specifier = ">=0.11.0" },
     { name = "tokenizers", specifier = ">=0.22.0" },
@@ -2573,7 +2573,7 @@ wheels = [
 [[package]]
 name = "rustbpe"
 version = "0.1.0"
-source = { git = "https://github.com/yuvalreif/rustbpe.git?rev=50d0fb1eedd7e24097a26be40a48e71b03392bc7#50d0fb1eedd7e24097a26be40a48e71b03392bc7" }
+source = { git = "https://github.com/yuvalreif/rustbpe.git?rev=aa041b83d643e73700b8b56499fcd7ebafd9a0f2#aa041b83d643e73700b8b56499fcd7ebafd9a0f2" }
 
 [[package]]
 name = "safetensors"
