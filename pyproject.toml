@@ -37,7 +37,7 @@ python_functions = ["test_*"]
 
 # target torch to cuda 12.8 or CPU
 [tool.uv.sources]
-rustbpe = { git = "https://github.com/yuvalreif/rustbpe.git", rev = "5bd02bd62aa38f5b58a5f6b993cb2754c1010041" }
+rustbpe = { git = "https://github.com/yuvalreif/rustbpe.git", rev = "50d0fb1eedd7e24097a26be40a48e71b03392bc7" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "gpu" },

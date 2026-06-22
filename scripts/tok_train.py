@@ -6,7 +6,7 @@ import os
 import time
 import argparse
 import torch
-from nanochat.tokenizer import RustBPETokenizer
+from nanochat.tokenizer import RustBPETokenizer, get_tokenizer
 from nanochat.cobpe.training import (
     normalize_cobpe_training_text,
     save_cobpe_metadata,
@@ -81,8 +81,9 @@ Numbers: 123, 4567, 89
 Contractions: I'm, you're, it's
 Special chars: @#$%^&*()
 Unicode: 你好世界 🌍"""
-encoded = tokenizer.encode(test_text)
-decoded = tokenizer.decode(encoded)
+roundtrip_tokenizer = get_tokenizer() if args.cobpe else tokenizer
+encoded = roundtrip_tokenizer.encode_sequence(test_text)
+decoded = roundtrip_tokenizer.decode_sequence(encoded)
 assert decoded == test_text
 
 # -----------------------------------------------------------------------------

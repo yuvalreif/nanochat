@@ -178,7 +178,11 @@ for tokenizer_name in ["gpt2", "gpt4", "ours"]:
     for name, text in all_text:
         encoded = tokenizer.encode_sequence(text)
         decoded = tokenizer.decode_sequence(encoded)
-        assert decoded == text
+        if decoded != text:
+            mismatch_idx = next((i for i, (expected, actual) in enumerate(zip(text, decoded)) if expected != actual), min(len(text), len(decoded)))
+            context_start = max(0, mismatch_idx - 40)
+            context_end = mismatch_idx + 80
+            assert decoded == text, f"{tokenizer_name}/{name} roundtrip mismatch at char {mismatch_idx}: expected={text[context_start:context_end]!r}, decoded={decoded[context_start:context_end]!r}"
 
         encoded_bytes = text.encode('utf-8')
         ratio = len(encoded_bytes) / len(encoded)
