@@ -9,6 +9,7 @@ import torch
 from nanochat.common import compute_init, autodetect_device_type
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
+from nanochat.token_codec import TokenCodec
 
 parser = argparse.ArgumentParser(description='Chat with the model')
 parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|rl")
@@ -33,6 +34,7 @@ assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
+token_codec = TokenCodec(tokenizer)
 
 print("\nNanoChat Interactive Mode")
 print("-" * 50)
@@ -40,7 +42,8 @@ print("Type 'quit' or 'exit' to end the conversation")
 print("Type 'clear' to start a new conversation")
 print("-" * 50)
 
-conversation_tokens = [bos]
+conversation_tokens = token_codec.empty_sequence()
+conversation_tokens.append_piece(token_codec.piece(bos))
 
 while True:
 
@@ -61,7 +64,8 @@ while True:
         break
 
     if user_input.lower() == 'clear':
-        conversation_tokens = [bos]
+        conversation_tokens = token_codec.empty_sequence()
+        conversation_tokens.append_piece(token_codec.piece(bos))
         print("Conversation cleared.")
         continue
 
@@ -69,30 +73,33 @@ while True:
         continue
 
     # Add User message to the conversation
-    conversation_tokens.append(user_start)
-    conversation_tokens.extend(tokenizer.encode(user_input))
-    conversation_tokens.append(user_end)
+    conversation_tokens.append_piece(token_codec.piece(user_start))
+    conversation_tokens.extend(token_codec.encode_text(user_input))
+    conversation_tokens.append_piece(token_codec.piece(user_end))
 
     # Kick off the assistant
-    conversation_tokens.append(assistant_start)
+    conversation_tokens.append_piece(token_codec.piece(assistant_start))
     generate_kwargs = {
         "num_samples": 1,
         "max_tokens": 256,
         "temperature": args.temperature,
         "top_k": args.top_k,
     }
-    response_tokens = []
+    response_tokens = token_codec.empty_sequence()
+    last_clean_text = ""
     print("\nAssistant: ", end="", flush=True)
-    for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
-        token = token_column[0] # pop the batch dimension (num_samples=1)
-        response_tokens.append(token)
-        token_text = tokenizer.decode([token])
-        print(token_text, end="", flush=True)
+    for step, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
+        piece = step.piece_at(0) # pop the batch dimension (num_samples=1)
+        response_tokens.append_piece(piece)
+        current_text = token_codec.decode(response_tokens)
+        if not current_text.endswith('�'):
+            print(current_text[len(last_clean_text):], end="", flush=True)
+            last_clean_text = current_text
     print()
     # we have to ensure that the assistant end token is the last token
     # so even if generation ends due to max tokens, we have to append it to the end
-    if response_tokens[-1] != assistant_end:
-        response_tokens.append(assistant_end)
+    if not response_tokens.ids or response_tokens.ids[-1] != assistant_end:
+        response_tokens.append_piece(token_codec.piece(assistant_end))
     conversation_tokens.extend(response_tokens)
 
     # In the prompt mode, we only want a single response and exit

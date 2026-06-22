@@ -32,6 +32,7 @@ from nanochat.tokenizer import get_tokenizer, get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+from nanochat.token_codec import TokenCodec
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
 print_banner()
@@ -491,18 +492,12 @@ while True:
             "If 5*x + 3 = 13, then x is",
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
+        token_codec = TokenCodec(tokenizer)
         for prompt in prompts:
-            if compositional_mode:
-                tokens = tokenizer.encode_with_modifiers(prompt, prepend="<|bos|>")
-            else:
-                tokens = tokenizer(prompt, prepend="<|bos|>")
+            tokens = token_codec.encode_text(prompt, prepend="<|bos|>")
             with disable_fp8(orig_model):
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-            if compositional_mode:
-                sample_ids, sample_mods = sample
-                print0(tokenizer.decode_with_modifiers(sample_ids[0], sample_mods[0]))
-            else:
-                print0(tokenizer.decode(sample[0]))
+            print0(token_codec.decode(sample[0]))
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step

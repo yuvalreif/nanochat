@@ -38,6 +38,7 @@ from nanochat.core_eval import evaluate_task
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
+from nanochat.token_codec import TokenCodec
 
 # -----------------------------------------------------------------------------
 # HuggingFace loading utilities
@@ -241,39 +242,21 @@ def main():
                 "If 5*x + 3 = 13, then x is",
             ]
             engine = Engine(model, tokenizer)
+            token_codec = TokenCodec(tokenizer)
             print0("\nConditioned samples:")
             for prompt in prompts:
-                if compositional_mode:
-                    tokens = tokenizer.encode_with_modifiers(prompt, prepend="<|bos|>")
-                else:
-                    tokens = tokenizer(prompt, prepend="<|bos|>")
+                tokens = token_codec.encode_text(prompt, prepend="<|bos|>")
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
-                if compositional_mode:
-                    sample_ids, sample_mods = sample
-                    sample_str = tokenizer.decode_with_modifiers(sample_ids[0], sample_mods[0])
-                else:
-                    sample_str = tokenizer.decode(sample[0])
+                sample_str = token_codec.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
                 samples.append(sample_str)
 
             print0("\nUnconditioned samples:")
-            if compositional_mode:
-                tokens = tokenizer.encode_with_modifiers("", prepend="<|bos|>")
-            else:
-                tokens = tokenizer("", prepend="<|bos|>")
+            tokens = token_codec.encode_text("", prepend="<|bos|>")
             uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
-            if compositional_mode:
-                uncond_ids, uncond_mods = uncond
-                iterator = zip(uncond_ids, uncond_mods)
-            else:
-                iterator = ((sample, None) for sample in uncond)
-            for sample_ids, sample_mods in iterator:
-                sample_str = (
-                    tokenizer.decode_with_modifiers(sample_ids, sample_mods)
-                    if compositional_mode
-                    else tokenizer.decode(sample_ids)
-                )
+            for sample in uncond:
+                sample_str = token_codec.decode(sample)
                 print0("-" * 80)
                 print0(sample_str)
                 unconditioned_samples.append(sample_str)

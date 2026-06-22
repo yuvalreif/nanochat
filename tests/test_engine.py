@@ -6,6 +6,7 @@ python -m pytest tests/test_engine.py -v
 
 import torch
 from nanochat.engine import KVCache, Engine
+from nanochat.token_codec import TokenSequence
 from dataclasses import dataclass
 
 
@@ -47,6 +48,30 @@ class MockModel:
         return logits
 
 
+class MockCompositionalModel(MockModel):
+    def __init__(self, vocab_size=262, modifier_group_sizes=(2,)):
+        super().__init__(vocab_size=vocab_size)
+        self.modifier_group_sizes = tuple(modifier_group_sizes)
+
+    def forward(self, ids, kv_cache=None, modifier_ids=None, return_hidden=False):
+        assert modifier_ids is not None
+        B, T = ids.shape
+        if kv_cache is not None:
+            kv_cache.advance(T)
+        logits = torch.zeros(B, T, self.vocab_size)
+        if not return_hidden:
+            return logits
+        hidden = torch.zeros(B, T, self.config.n_embd)
+        return logits, hidden
+
+    def get_modifier_logits(self, hidden, token_ids):
+        B, T = token_ids.shape
+        return [
+            torch.zeros(B, T, group_size, dtype=hidden.dtype)
+            for group_size in self.modifier_group_sizes
+        ]
+
+
 class ByteTokenizer:
     """
     Simple byte-level tokenizer for testing.
@@ -80,6 +105,28 @@ class ByteTokenizer:
         # Filter out special tokens before decoding
         byte_tokens = [t for t in tokens if t < 256]
         return bytes(byte_tokens).decode("utf-8", errors="replace")
+
+
+class CompositionalByteTokenizer(ByteTokenizer):
+    def has_compositional_mode(self):
+        return True
+
+    def get_default_modifier(self):
+        return [0]
+
+    def encode_with_modifiers(self, text, prepend=None, append=None):
+        if isinstance(text, list):
+            return [self.encode_with_modifiers(item, prepend=prepend, append=append) for item in text]
+        ids = self.encode(text, prepend=prepend)
+        if append is not None:
+            append_id = append if isinstance(append, int) else self.encode_special(append)
+            ids.append(append_id)
+        return ids, [[0] for _ in ids]
+
+    def decode_with_modifiers(self, token_ids, modifier_rows):
+        assert len(token_ids) == len(modifier_rows)
+        return self.decode(token_ids)
+
 
 def test_kv_cache_basic():
     """Test basic KVCache functionality for FA3."""
@@ -185,8 +232,8 @@ def test_multi_sample_first_token_diversity():
         temperature=1.0,
         seed=42,
     )
-    for token_column, token_masks in gen:
-        first_tokens = token_column  # This is the first (and only) yield
+    for step, token_masks in gen:
+        first_tokens = step  # This is the first (and only) yield
 
     # With uniform distribution and 16 samples, they should NOT all be identical
     # If they are all identical, the bug exists (broadcasting instead of sampling)
@@ -209,6 +256,32 @@ def test_seed_reproducibility():
         r2, _ = engine.generate_batch(prompt, max_tokens=5, seed=seed)
         r3, _ = engine.generate_batch(prompt, max_tokens=5, seed=seed)
         assert r1 == r2 == r3, "Same seed must produce identical output for the same prompt."
+
+
+def test_generate_batch_returns_token_sequences_for_regular_bpe():
+    model = MockModel()
+    engine = Engine(model, ByteTokenizer())
+    prompt = [261, 72, 101, 108, 108, 111]
+
+    results, masks = engine.generate_batch(prompt, temperature=0.0, max_tokens=3, seed=1)
+
+    assert isinstance(results[0], TokenSequence)
+    assert results[0].modifiers is None
+    assert list(results[0]) == results[0].ids
+    assert len(masks[0]) == len(results[0])
+
+
+def test_compositional_generate_accepts_plain_token_ids_with_default_modifiers():
+    model = MockCompositionalModel()
+    tokenizer = CompositionalByteTokenizer()
+    engine = Engine(model, tokenizer)
+    prompt = [tokenizer.get_bos_token_id(), ord("A")]
+
+    results, masks = engine.generate_batch(prompt, temperature=0.0, max_tokens=3, seed=1)
+
+    assert isinstance(results[0], TokenSequence)
+    assert results[0].modifiers == [[0] for _ in results[0].ids]
+    assert len(masks[0]) == len(results[0])
 
 
 def test_temperature_zero_determinism():

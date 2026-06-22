@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from collections import deque
 from nanochat.common import compute_init, autodetect_device_type
 from nanochat.checkpoint_manager import load_model
+from nanochat.token_codec import TokenCodec
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
@@ -159,13 +160,11 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
 
 class RowState:
     # Per-row state tracking during generation
-    def __init__(self, current_tokens=None, current_modifier_rows=None):
-        self.current_tokens = current_tokens or [] # Current token sequence for this row
-        self.current_modifier_rows = current_modifier_rows
-        self.forced_steps = deque() # Queue of (token_id, modifier_row_or_none) to force inject
+    def __init__(self, current_tokens):
+        self.current_tokens = current_tokens
+        self.forced_steps = deque() # Queue of TokenPiece items to force inject
         self.in_python_block = False # Whether we are inside a python block
-        self.python_expr_tokens = [] # Tokens of the current python expression
-        self.python_expr_modifier_rows = [] # Modifier rows of the current python expression
+        self.python_expr_tokens = None # TokenSequence of the current python expression
         self.completed = False # Whether this row has completed generation
 
 class Engine:
@@ -173,15 +172,7 @@ class Engine:
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer # needed for tool use
-
-    def _normalize_prompt(self, tokens):
-        if isinstance(tokens, tuple):
-            token_ids, modifier_rows = tokens
-            assert isinstance(token_ids, list) and token_ids and isinstance(token_ids[0], int), "expecting list of ints"
-            assert isinstance(modifier_rows, list) and len(modifier_rows) == len(token_ids), "modifier rows must match token length"
-            return token_ids, [list(row) for row in modifier_rows]
-        assert isinstance(tokens, list) and tokens and isinstance(tokens[0], int), "expecting list of ints"
-        return tokens, None
+        self.token_codec = TokenCodec(tokenizer)
 
     def _sample_modifier_rows(self, hidden, token_ids, rng, temperature, top_k):
         if not hasattr(self.model, "get_modifier_logits"):
@@ -199,8 +190,8 @@ class Engine:
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
         """Same as generate, but does single prefill and then clones the KV cache."""
-        tokens, prompt_modifier_rows = self._normalize_prompt(tokens)
-        compositional_mode = prompt_modifier_rows is not None
+        prompt = self.token_codec.normalize(tokens)
+        compositional_mode = prompt.modifiers is not None
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
         # Currently the repo assumes that cuda -> bfloat16 and everything else -> float32.
@@ -226,15 +217,13 @@ class Engine:
         kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
         kv_cache_prefill = KVCache(
             batch_size=1,
-            seq_len=len(tokens),
+            seq_len=len(prompt),
             device=device,
             dtype=dtype,
             **kv_model_kwargs,
         )
-        ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        modifier_ids = None
+        ids, modifier_ids = self.token_codec.sequence_tensor(prompt, device)
         if compositional_mode:
-            modifier_ids = torch.tensor([prompt_modifier_rows], dtype=torch.long, device=device)
             logits, hidden = self.model.forward(
                 ids,
                 kv_cache=kv_cache_prefill,
@@ -247,7 +236,7 @@ class Engine:
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        kv_length_hint = (len(prompt) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
         kv_cache_decode = KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
@@ -260,17 +249,9 @@ class Engine:
 
         # 3) Initialize states for each sample
         row_states = [
-            RowState(
-                tokens.copy(),
-                None if prompt_modifier_rows is None else [list(row) for row in prompt_modifier_rows],
-            )
+            RowState(prompt.copy())
             for _ in range(num_samples)
         ]
-        default_modifier = (
-            list(self.tokenizer.get_default_modifier())
-            if compositional_mode and hasattr(self.tokenizer, "get_default_modifier")
-            else None
-        )
 
         # 4) Main generation loop
         num_generated = 0
@@ -292,76 +273,50 @@ class Engine:
             )
 
             # Process each row: choose the next token, update state, optional tool use
-            token_column = [] # contains the next token id along each row
-            modifier_column = [] if compositional_mode else None
+            step = self.token_codec.empty_step()
             token_masks = [] # contains the mask (was it sampled (1) or forced (0)?) along each row
             for i, state in enumerate(row_states):
                 # Select the next token in this row
                 is_forced = len(state.forced_steps) > 0 # are there tokens waiting to be forced in deque?
                 token_masks.append(0 if is_forced else 1) # mask is 0 if forced, 1 if sampled
                 if is_forced:
-                    next_token, next_modifier = state.forced_steps.popleft()
+                    next_piece = state.forced_steps.popleft()
                 else:
-                    next_token = sampled_tokens[i]
-                    next_modifier = None if sampled_modifier_rows is None else sampled_modifier_rows[i]
-                token_column.append(next_token)
-                if compositional_mode:
-                    modifier_column.append(list(next_modifier))
+                    next_piece = self.token_codec.piece(
+                        sampled_tokens[i],
+                        None if sampled_modifier_rows is None else sampled_modifier_rows[i],
+                    )
+                step.append(next_piece.id, next_piece.modifier)
                 # Update the state of this row to include the next token
-                state.current_tokens.append(next_token)
-                if compositional_mode and state.current_modifier_rows is not None:
-                    state.current_modifier_rows.append(list(next_modifier))
+                state.current_tokens.append_piece(next_piece)
                 # On <|assistant_end|> or <|bos|>, mark the row as completed
-                if next_token == assistant_end or next_token == bos:
+                if next_piece.id == assistant_end or next_piece.id == bos:
                     state.completed = True
                 # Handle tool logic
-                if next_token == python_start:
+                if next_piece.id == python_start:
                     state.in_python_block = True
-                    state.python_expr_tokens = []
-                    state.python_expr_modifier_rows = []
-                elif next_token == python_end and state.in_python_block:
+                    state.python_expr_tokens = self.token_codec.empty_sequence()
+                elif next_piece.id == python_end and state.in_python_block:
                     state.in_python_block = False
-                    if state.python_expr_tokens:
-                        if compositional_mode:
-                            expr = self.tokenizer.decode_with_modifiers(
-                                state.python_expr_tokens,
-                                state.python_expr_modifier_rows,
-                            )
-                        else:
-                            expr = self.tokenizer.decode(state.python_expr_tokens)
+                    if state.python_expr_tokens is not None and len(state.python_expr_tokens) > 0:
+                        expr = self.token_codec.decode(state.python_expr_tokens)
                         result = use_calculator(expr)
                         if result is not None:
-                            if compositional_mode:
-                                result_tokens, result_modifiers = self.tokenizer.encode_with_modifiers(str(result))
-                                state.forced_steps.append((output_start, list(default_modifier)))
-                                state.forced_steps.extend(
-                                    (token_id, list(modifier_row))
-                                    for token_id, modifier_row in zip(result_tokens, result_modifiers)
-                                )
-                                state.forced_steps.append((output_end, list(default_modifier)))
-                            else:
-                                result_tokens = self.tokenizer.encode(str(result))
-                                state.forced_steps.append((output_start, None))
-                                state.forced_steps.extend((token_id, None) for token_id in result_tokens)
-                                state.forced_steps.append((output_end, None))
-                    state.python_expr_tokens = []
-                    state.python_expr_modifier_rows = []
+                            result_tokens = self.token_codec.encode_text(str(result))
+                            state.forced_steps.append(self.token_codec.piece(output_start))
+                            state.forced_steps.extend(result_tokens.pieces())
+                            state.forced_steps.append(self.token_codec.piece(output_end))
+                    state.python_expr_tokens = self.token_codec.empty_sequence()
                 elif state.in_python_block:
-                    state.python_expr_tokens.append(next_token)
-                    if compositional_mode:
-                        state.python_expr_modifier_rows.append(list(next_modifier))
+                    state.python_expr_tokens.append_piece(next_piece)
 
-            # Yield the token column
-            if compositional_mode:
-                yield (token_column, modifier_column), token_masks
-            else:
-                yield token_column, token_masks
+            # Yield the next generated step across all samples.
+            yield step, token_masks
             num_generated += 1
 
             # Prepare logits for next iteration
-            ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
+            ids, modifier_ids = self.token_codec.step_tensor(step, device)
             if compositional_mode:
-                modifier_ids = torch.tensor(modifier_column, dtype=torch.long, device=device).unsqueeze(1)
                 logits, hidden = self.model.forward(
                     ids,
                     kv_cache=kv_cache_decode,
@@ -379,38 +334,23 @@ class Engine:
         Returns a list of token sequences (list of lists of ints).
         Terminal tokens (assistant_end, bos) are not included in the results.
         """
-        prompt_tokens, prompt_modifier_rows = self._normalize_prompt(tokens)
-        compositional_mode = prompt_modifier_rows is not None
+        prompt = self.token_codec.normalize(tokens)
         assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
         bos = self.tokenizer.get_bos_token_id()
-        results = [prompt_tokens.copy() for _ in range(num_samples)]
-        result_modifiers = (
-            [[list(row) for row in prompt_modifier_rows] for _ in range(num_samples)]
-            if compositional_mode
-            else None
-        )
-        masks = [[0] * len(prompt_tokens) for _ in range(num_samples)]
+        results = [prompt.copy() for _ in range(num_samples)]
+        masks = [[0] * len(prompt) for _ in range(num_samples)]
         completed = [False] * num_samples
-        for token_column, token_masks in self.generate(tokens, num_samples, **kwargs):
-            if compositional_mode:
-                token_ids, modifier_rows = token_column
-            else:
-                token_ids = token_column
-                modifier_rows = None
-            for i, (token, mask) in enumerate(zip(token_ids, token_masks)):
+        for step, token_masks in self.generate(prompt, num_samples, **kwargs):
+            for i, (token, mask) in enumerate(zip(step.ids, token_masks)):
                 if not completed[i]:
                     if token == assistant_end or token == bos:
                         completed[i] = True
                     else:
-                        results[i].append(token)
-                        if compositional_mode:
-                            result_modifiers[i].append(list(modifier_rows[i]))
+                        results[i].append_piece(step.piece_at(i))
                         masks[i].append(mask)
             # Stop if all rows are completed
             if all(completed):
                 break
-        if compositional_mode:
-            return (results, result_modifiers), masks
         return results, masks
 
 
@@ -450,8 +390,8 @@ if __name__ == "__main__":
     stream = engine.generate(prompt_tokens, num_samples=1, **kwargs) # note: runs in fp32
     torch.cuda.synchronize()
     t0 = time.time()
-    for token_column, token_masks in stream:
-        token = token_column[0] # only print out the first row
+    for step, token_masks in stream:
+        token = step[0] # only print out the first sample
         generated_tokens.append(token)
         chunk = tokenizer.decode([token])
         print(chunk, end="", flush=True)
