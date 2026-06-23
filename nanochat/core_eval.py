@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from jinja2 import Template
 import torch
 import torch.distributed as dist
-from nanochat.cobpe.eval import find_changed_token_span, option_mean_loss_with_suffix_boundary_rule
+from nanochat.cobpe.eval import find_changed_token_span, modifier_predictions_match_with_suffix_boundary_rule, option_mean_loss_with_suffix_boundary_rule
 from nanochat.token_codec import EncodedSequence, stack_sequences
 
 # -----------------------------------------------------------------------------
@@ -278,7 +278,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         if is_correct and model_output.modifier_predictions is not None:
             predicted_modifiers = model_output.modifier_predictions[0, si-1:ei-1]
             actual_modifiers = input_modifier_ids[0, si:ei]
-            is_correct = torch.all(predicted_modifiers == actual_modifiers).item()
+            is_correct = modifier_predictions_match_with_suffix_boundary_rule(predicted_modifiers, actual_modifiers, tokenizer)
     elif task_type in ['multiple_choice', 'schema']:
         # For MC/schema: find the option with lowest average loss
         if model_output.modifier_group_losses is None:

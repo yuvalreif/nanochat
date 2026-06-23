@@ -76,3 +76,29 @@ def option_mean_loss_with_suffix_boundary_rule(
             if target_suffix_value == default_suffix:
                 span_losses[-1] = span_losses[-1] - modifier_group_losses[suffix_group_idx][option_idx, pred_last_idx]
     return span_losses.mean().item()
+
+
+def modifier_predictions_match_with_suffix_boundary_rule(
+    predicted_modifiers: torch.Tensor,
+    actual_modifiers: torch.Tensor,
+    tokenizer,
+) -> bool:
+    """
+    Exact modifier match for LM tasks, except final default suffix punctuation.
+
+    If the gold answer does not include suffix punctuation, BPE-style generation
+    would not have generated that suffix yet, so the final default suffix value is
+    outside the answer boundary. Non-default gold suffix punctuation still counts.
+    """
+    matches = predicted_modifiers == actual_modifiers
+    if (
+        predicted_modifiers.numel() > 0
+        and hasattr(tokenizer, "spec")
+        and ("suffix_punctuation" in tokenizer.spec.group_to_idx)
+    ):
+        suffix_group_idx = int(tokenizer.spec.group_to_idx["suffix_punctuation"])
+        default_suffix = int(tokenizer.get_default_modifier()[suffix_group_idx])
+        target_suffix_value = int(actual_modifiers[-1, suffix_group_idx].item())
+        if target_suffix_value == default_suffix:
+            matches[-1, suffix_group_idx] = True
+    return bool(torch.all(matches).item())

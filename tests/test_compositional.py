@@ -1,7 +1,9 @@
 import json
 
 import pytest
+import torch
 
+from nanochat.cobpe.eval import modifier_predictions_match_with_suffix_boundary_rule
 from nanochat.cobpe.runtime import RustCompositionalBackend
 from nanochat.cobpe.tokenizer import CompositionalSpec, RustCoBPETokenizer, build_cobpe_metadata
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
@@ -51,6 +53,28 @@ def test_encoded_sequence_construction_is_zero_copy():
     modifiers.append([2])
     assert seq.ids == [1, 2, 3]
     assert seq.modifiers == [[0], [1], [2]]
+
+
+def test_lm_modifier_match_ignores_only_final_default_suffix():
+    class MockSpec:
+        group_to_idx = {"suffix_punctuation": 2}
+
+    class MockTokenizer:
+        spec = MockSpec()
+
+        def get_default_modifier(self):
+            return [0, 0, 0]
+
+    actual = torch.tensor([[1, 0, 0], [1, 2, 0]])
+    predicted = torch.tensor([[1, 0, 0], [1, 2, 3]])
+    assert modifier_predictions_match_with_suffix_boundary_rule(predicted, actual, MockTokenizer())
+
+    predicted_other_mismatch = torch.tensor([[1, 0, 0], [1, 9, 3]])
+    assert not modifier_predictions_match_with_suffix_boundary_rule(predicted_other_mismatch, actual, MockTokenizer())
+
+    actual_with_suffix = torch.tensor([[1, 0, 0], [1, 2, 4]])
+    predicted_suffix_mismatch = torch.tensor([[1, 0, 0], [1, 2, 3]])
+    assert not modifier_predictions_match_with_suffix_boundary_rule(predicted_suffix_mismatch, actual_with_suffix, MockTokenizer())
 
 
 def test_compositional_spec_to_rust_config_exports_runtime_contract():
