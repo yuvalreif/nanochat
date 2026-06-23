@@ -188,8 +188,6 @@ if args.fp8:
         def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
             if not isinstance(mod, nn.Linear):
                 return False
-            if fqn == "lm_head" or (compositional_mode and fqn.startswith("cobpe.")):
-                return False
             if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
                 return False
             if min(mod.in_features, mod.out_features) < 128:
