@@ -1,14 +1,16 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from nanochat.cobpe.model import CoBPEModule
 from nanochat.gpt import GPT, GPTConfig, Linear
 
 
-def _build_model(*, modifier_group_sizes=()):
+def _build_model(*, modifier_group_sizes=(), n_layer=2):
     cfg = GPTConfig(
         sequence_len=8,
         vocab_size=32,
-        n_layer=2,
+        n_layer=n_layer,
         n_head=4,
         n_kv_head=4,
         n_embd=32,
@@ -21,6 +23,23 @@ def _build_model(*, modifier_group_sizes=()):
     model.to_empty(device="cpu")
     model.init_weights()
     return model
+
+
+def _norm(x):
+    return F.rms_norm(x, (x.size(-1),))
+
+
+class _CaptureBlock(nn.Module):
+    def __init__(self, delta=None):
+        super().__init__()
+        self.delta = delta
+        self.inputs = []
+
+    def forward(self, x, ve, cos_sin, window_size, kv_cache):
+        self.inputs.append(x.detach().clone())
+        if self.delta is None:
+            return x
+        return x + self.delta.to(device=x.device, dtype=x.dtype)
 
 
 def test_gpt_baseline_forward_still_works_without_modifiers():
@@ -46,6 +65,51 @@ def test_gpt_compositional_forward_accepts_modifier_ids_and_targets():
     loss = model(ids, targets, modifier_ids=modifier_ids, target_modifier_ids=modifier_ids)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
+
+
+def test_gpt_compositional_smear_uses_previous_base_embedding_only():
+    model = _build_model(modifier_group_sizes=(3, 4))
+    capture = _CaptureBlock()
+    model.transformer.h = nn.ModuleList([capture, _CaptureBlock()])
+    with torch.no_grad():
+        model.resid_lambdas.fill_(1.0)
+        model.x0_lambdas.zero_()
+        model.smear_lambda.fill_(1.0)
+        model.smear_gate.weight.zero_()
+
+    ids = torch.tensor([[2, 5, 7]], dtype=torch.long)
+    modifier_ids = torch.tensor([[[1, 2], [2, 3], [0, 1]]], dtype=torch.long)
+    model(ids, modifier_ids=modifier_ids, return_hidden_only=True)
+
+    base = _norm(model.transformer.wte(ids))
+    composed = _norm(model.transformer.wte(ids) + model.cobpe.embed_sum(modifier_ids))
+    expected = torch.cat([composed[:, :1], composed[:, 1:] + 0.5 * base[:, :-1]], dim=1)
+    assert torch.allclose(capture.inputs[0], expected, atol=1e-5, rtol=1e-5)
+
+
+def test_gpt_compositional_returned_hidden_is_pre_backout_for_modifier_head():
+    model = _build_model(modifier_group_sizes=(3, 4), n_layer=3)
+    delta = torch.linspace(-0.5, 0.5, model.config.n_embd).view(1, 1, -1)
+    model.transformer.h = nn.ModuleList([_CaptureBlock(), _CaptureBlock(), _CaptureBlock(delta)])
+    with torch.no_grad():
+        model.resid_lambdas.fill_(1.0)
+        model.x0_lambdas.zero_()
+        model.smear_lambda.zero_()
+        model.backout_lambda.fill_(0.5)
+
+    ids = torch.tensor([[2, 5, 7]], dtype=torch.long)
+    modifier_ids = torch.tensor([[[1, 2], [2, 3], [0, 1]]], dtype=torch.long)
+    logits, hidden = model(ids, modifier_ids=modifier_ids, return_hidden=True)
+
+    trunk_input = _norm(model.transformer.wte(ids) + model.cobpe.embed_sum(modifier_ids))
+    expected_modifier_hidden = _norm(trunk_input + delta)
+    expected_base_hidden = _norm(trunk_input + delta - 0.5 * trunk_input)
+
+    assert torch.allclose(hidden, expected_modifier_hidden, atol=1e-5, rtol=1e-5)
+    assert not torch.allclose(hidden, expected_base_hidden, atol=1e-5, rtol=1e-5)
+    expected_logits = model.lm_head(expected_base_hidden)[..., :model.config.vocab_size].float()
+    expected_logits = 15 * torch.tanh(expected_logits / 15)
+    assert torch.allclose(logits, expected_logits, atol=1e-5, rtol=1e-5)
 
 
 def test_gpt_rejects_modifier_ids_when_model_has_no_modifier_groups():

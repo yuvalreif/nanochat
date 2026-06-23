@@ -466,28 +466,34 @@ class GPT(nn.Module):
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
         # Embed the tokens
-        x = self.transformer.wte(idx) # embed current token
+        base_x = self.transformer.wte(idx) # embed current token
+        x = base_x
         if modifier_ids is not None:
             if self.cobpe is None:
                 raise ValueError("modifier_ids were provided but the model has no modifier groups configured.")
             x = x + self.cobpe.embed_sum(modifier_ids).to(dtype=x.dtype)
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
+        smear_source = x
+        if self.cobpe is not None:
+            # CoBPE modifiers encode token-local surface details. Smear should
+            # provide previous-token context without injecting previous modifiers.
+            smear_source = norm(base_x.to(COMPUTE_DTYPE))
 
         # Smear: mix previous token's embedding into current position (cheap bigram info)
         if kv_cache is None:
             # Training / naive generate: full sequence available, use fast slice
             assert T > 1, "Training forward pass should have T > 1"
             gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
-            x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
+            x = torch.cat([x[:, :1], x[:, 1:] + gate * smear_source[:, :-1]], dim=1)
         else:
             # KV cache inference: read prev embedding from cache, store current for next step
             x_pre_smear = kv_cache.prev_embedding
-            kv_cache.prev_embedding = x[:, -1:, :]
+            kv_cache.prev_embedding = smear_source[:, -1:, :]
             if T > 1:
                 # Prefill: apply smear to positions 1+, same as training
                 gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
-                x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
+                x = torch.cat([x[:, :1], x[:, 1:] + gate * smear_source[:, :-1]], dim=1)
             elif x_pre_smear is not None:
                 # Decode: single token, use cached prev embedding
                 gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, :, :24]))
@@ -504,13 +510,15 @@ class GPT(nn.Module):
             x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
             if i == backout_layer:
                 x_backout = x
+        modifier_hidden = norm(x) if self.cobpe is not None else None
         # Subtract mid-layer residual to remove low-level features before logit projection
         if x_backout is not None:
             x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = norm(x)
+        hidden_for_modifiers = modifier_hidden if modifier_hidden is not None else x
 
         if return_hidden_only:
-            return x
+            return hidden_for_modifiers
 
         # Forward the lm_head (compute logits)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
@@ -523,16 +531,16 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
-            modifier_loss = self._modifier_loss(x, targets, target_modifier_ids, loss_reduction)
+            modifier_loss = self._modifier_loss(hidden_for_modifiers, targets, target_modifier_ids, loss_reduction)
             if modifier_loss is not None:
                 loss = loss + float(self.config.modifier_loss_weight) * modifier_loss
             if return_hidden:
-                return loss, x
+                return loss, hidden_for_modifiers
             return loss
         else:
             # inference: just return the logits directly
             if return_hidden:
-                return logits, x
+                return logits, hidden_for_modifiers
             return logits
 
     @torch.inference_mode()
