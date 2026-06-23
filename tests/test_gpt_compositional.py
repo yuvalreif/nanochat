@@ -96,12 +96,24 @@ def test_gpt_compositional_pads_modifier_tables_for_ddp_sharding():
     assert model.cobpe.embed_sum(modifier_ids).shape == (2, 8, model.config.n_embd)
 
 
-def test_cobpe_canonical_modifier_head_keeps_fp8_skip_shapes_even_when_padded():
+def test_cobpe_canonical_modifier_head_pads_refine_dim_for_adamw_sharding():
     module = CoBPEModule((31, 30), 768, Linear)
-    assert module.refine_fc.out_features == 244
+    assert module.refine_fc.out_features == 256
     assert module.refine_out.out_features == 64
-    assert module.refine_fc.out_features % 16 != 0
+    assert module.refine_fc.out_features % 8 == 0
     assert min(module.refine_out.in_features, module.refine_out.out_features) < 128
+
+
+def test_gpt_compositional_adamw_params_are_8gpu_shardable():
+    model = _build_model(modifier_group_sizes=(31, 30))
+    optimizer = model.setup_optimizer()
+
+    for group in optimizer.param_groups:
+        if group["kind"] != "adamw":
+            continue
+        for param in group["params"]:
+            if param.numel() >= 1024 and param.ndim > 0:
+                assert param.shape[0] % 8 == 0
 
 
 def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():

@@ -22,7 +22,7 @@ class CoBPEModule(nn.Module):
     independently for each modifier group.
     """
 
-    def __init__(self, group_sizes, n_embd, linear_cls, pad_total_size_to=64):
+    def __init__(self, group_sizes, n_embd, linear_cls, pad_total_size_to=64, pad_refine_dim_to=64):
         super().__init__()
         self.group_sizes = tuple(int(size) for size in group_sizes)
         self.num_groups = len(self.group_sizes)
@@ -34,7 +34,8 @@ class CoBPEModule(nn.Module):
             offsets.append(offset)
             offset += group_size
         self.group_offsets = tuple(offsets)
-        refine_dim = min(n_embd, max(32, 4 * self.total_size))
+        # AdamW reduce_scatter shards on dim 0, so keep modifier matrices shard-friendly.
+        refine_dim = min(n_embd, _round_up(max(32, 4 * self.total_size), pad_refine_dim_to))
         self.embed = nn.Embedding(self.padded_total_size, n_embd)
         self.refine_fc = linear_cls(2 * n_embd, refine_dim, bias=False)
         self.refine_out = linear_cls(refine_dim, self.padded_total_size, bias=False)
