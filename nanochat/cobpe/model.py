@@ -76,7 +76,10 @@ class CoBPEModule(nn.Module):
         hidden_flat = hidden.view(-1, hidden.size(-1))
         base_rep = F.embedding(token_ids.view(-1).long(), base_unembedding).to(dtype=hidden_flat.dtype)
         refine_in = torch.cat([_norm(hidden_flat), _norm(base_rep)], dim=-1)
+        softcap = 15
         all_logits = self.refine_out(F.silu(self.refine_fc(refine_in)))
+        all_logits = all_logits.float()
+        all_logits = softcap * torch.tanh(all_logits / softcap)
         outputs = []
         for group_idx, group_size in enumerate(self.group_sizes):
             start = self.group_offsets[group_idx]
