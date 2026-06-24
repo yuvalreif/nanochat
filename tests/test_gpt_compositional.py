@@ -92,8 +92,8 @@ def test_gpt_compositional_skips_smear():
     with torch.no_grad():
         model.resid_lambdas.fill_(1.0)
         model.x0_lambdas.zero_()
-        model.smear_lambda.fill_(1.0)
-        model.smear_gate.weight.zero_()
+    assert not hasattr(model, "smear_lambda")
+    assert not hasattr(model, "smear_gate")
 
     ids = torch.tensor([[2, 5, 7]], dtype=torch.long)
     modifier_ids = torch.tensor([[[1, 2], [2, 3], [0, 1]]], dtype=torch.long)
@@ -131,8 +131,8 @@ def test_gpt_compositional_skips_backout():
     with torch.no_grad():
         model.resid_lambdas.fill_(1.0)
         model.x0_lambdas.zero_()
-        model.smear_lambda.zero_()
-        model.backout_lambda.fill_(0.5)
+    assert not hasattr(model, "smear_lambda")
+    assert not hasattr(model, "backout_lambda")
 
     ids = torch.tensor([[2, 5, 7]], dtype=torch.long)
     modifier_ids = torch.tensor([[[1, 2], [2, 3], [0, 1]]], dtype=torch.long)
@@ -140,13 +140,22 @@ def test_gpt_compositional_skips_backout():
 
     trunk_input = _norm(model.transformer.wte(ids) + model.cobpe.embed_sum(modifier_ids))
     expected_hidden = _norm(trunk_input + delta)
-    backout_hidden = _norm(trunk_input + delta - 0.5 * trunk_input)
 
     assert torch.allclose(hidden, expected_hidden, atol=1e-5, rtol=1e-5)
-    assert not torch.allclose(hidden, backout_hidden, atol=1e-5, rtol=1e-5)
     expected_logits = model.lm_head(expected_hidden)[..., :model.config.vocab_size].float()
     expected_logits = 15 * torch.tanh(expected_logits / 15)
     assert torch.allclose(logits, expected_logits, atol=1e-5, rtol=1e-5)
+
+
+def test_gpt_compositional_has_no_smear_backout_params():
+    model = _build_model(modifier_group_sizes=(3, 4))
+    assert not hasattr(model, "smear_gate")
+    assert not hasattr(model, "smear_lambda")
+    assert not hasattr(model, "backout_lambda")
+    assert model.estimate_flops() > 0
+    params = model.num_scaling_params()
+    assert params["total"] == sum(p.numel() for p in model.parameters())
+    model.setup_optimizer()
 
 
 def test_gpt_rejects_modifier_ids_when_model_has_no_modifier_groups():
@@ -205,7 +214,7 @@ def test_cobpe_canonical_modifier_head_pads_refine_dim_for_adamw_sharding():
     assert min(module.refine_out.in_features, module.refine_out.out_features) < 128
 
 
-def test_cobpe_modifier_logits_are_softcapped():
+def test_cobpe_modifier_logits_are_not_softcapped():
     module = CoBPEModule((3,), 32, Linear)
     with torch.no_grad():
         module.refine_fc.weight.fill_(1.0)
@@ -215,9 +224,7 @@ def test_cobpe_modifier_logits_are_softcapped():
     base_unembedding = torch.ones(32, 32)
 
     (logits,) = module.logits(hidden, token_ids, base_unembedding)
-    assert logits.dtype == torch.float32
-    assert torch.all(logits <= 15)
-    assert torch.all(logits > 14.99)
+    assert torch.all(logits > 15)
 
 
 def test_gpt_compositional_adamw_params_are_8gpu_shardable():
