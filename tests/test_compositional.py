@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -29,6 +30,26 @@ def test_build_cobpe_metadata_is_complete_and_json_serializable():
     assert "det_the" in spec.group_value_names["determiners"]
     assert "prep_on" in spec.group_value_names["prepositions"]
     assert "punct_suffix_." in spec.group_value_names["suffix_punctuation"]
+
+
+def test_remove_cobpe_metadata_cleans_stale_sidecars(tmp_path):
+    from nanochat.cobpe.training import remove_cobpe_metadata
+
+    tokenizer_dir = tmp_path / "tokenizer"
+    tokenizer_dir.mkdir()
+    compositional_path = tokenizer_dir / "compositional.json"
+    config_path = tokenizer_dir / "cobpe_config.json"
+    tokenizer_path = tokenizer_dir / "tokenizer.pkl"
+    compositional_path.write_text("{}", encoding="utf-8")
+    config_path.write_text("{}", encoding="utf-8")
+    tokenizer_path.write_bytes(b"tokenizer")
+
+    removed = remove_cobpe_metadata(str(tokenizer_dir))
+
+    assert sorted(Path(path).name for path in removed) == ["cobpe_config.json", "compositional.json"]
+    assert not compositional_path.exists()
+    assert not config_path.exists()
+    assert tokenizer_path.exists()
 
 
 def test_stack_sequences_handles_plain_and_modifier_sequences():

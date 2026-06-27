@@ -9,6 +9,7 @@ import tiktoken
 from nanochat.cobpe.tokenizer import build_cobpe_metadata
 from nanochat.tokenizer import RustBPETokenizer, SPECIAL_TOKENS
 COBPE_VOCAB_BUFFER_SIZE = 512
+COBPE_METADATA_FILENAMES = ("compositional.json", "cobpe_config.json")
 NORMALIZED_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|\p{L}+|\p{N}{1,2}|[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 WORD_PATTERN = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)*")
 PUNCT_TO_WORD_BOUNDARY_PATTERN = re.compile(r"([^\w\s])(?=\w)")
@@ -87,6 +88,17 @@ def save_cobpe_metadata(tokenizer_dir: str, build_report: dict):
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, sort_keys=True)
     return metadata_path, config_path
+
+
+def remove_cobpe_metadata(tokenizer_dir: str) -> list[str]:
+    """Remove CoBPE sidecar files so a plain BPE tokenizer cannot load as CoBPE."""
+    removed = []
+    for filename in COBPE_METADATA_FILENAMES:
+        path = os.path.join(tokenizer_dir, filename)
+        if os.path.exists(path):
+            os.remove(path)
+            removed.append(path)
+    return removed
 
 
 def detect_redundant_token_ids(tokenizer) -> dict[str, list[int]]:

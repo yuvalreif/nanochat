@@ -77,7 +77,12 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+# Tokenizer guardrails
+parser.add_argument("--require-cobpe", action="store_true", help="fail unless the loaded tokenizer is running in CoBPE/compositional mode")
+parser.add_argument("--forbid-cobpe", action="store_true", help="fail if the loaded tokenizer is running in CoBPE/compositional mode")
 args = parser.parse_args()
+if args.require_cobpe and args.forbid_cobpe:
+    raise ValueError("--require-cobpe and --forbid-cobpe are mutually exclusive")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -128,9 +133,26 @@ compositional_mode = bool(
 modifier_group_sizes = tuple(tokenizer.get_modifier_group_sizes()) if compositional_mode else ()
 user_config["compositional_mode"] = compositional_mode
 user_config["modifier_group_sizes"] = list(modifier_group_sizes)
+tokenizer_dir = os.path.join(get_base_dir(), "tokenizer")
+compositional_metadata_path = os.path.join(tokenizer_dir, "compositional.json")
+cobpe_config_path = os.path.join(tokenizer_dir, "cobpe_config.json")
+print0(f"Tokenizer directory: {tokenizer_dir}")
+print0(f"Tokenizer class: {type(tokenizer).__name__}")
+print0(
+    "Tokenizer compositional metadata: "
+    + (compositional_metadata_path if os.path.exists(compositional_metadata_path) else "not present")
+)
+if os.path.exists(cobpe_config_path):
+    print0(f"CoBPE build config: {cobpe_config_path}")
+if args.require_cobpe and not compositional_mode:
+    raise RuntimeError("--require-cobpe was set, but the tokenizer loaded as plain BPE.")
+if args.forbid_cobpe and compositional_mode:
+    raise RuntimeError("--forbid-cobpe was set, but the tokenizer loaded as CoBPE/compositional.")
 if compositional_mode:
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
     print0("Compositional tokenizer backend: rustbpe")
+else:
+    print0("Compositional mode disabled; training plain BPE token ids only.")
 
 # -----------------------------------------------------------------------------
 # Initialize the Model
@@ -356,6 +378,49 @@ build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(
     with_modifiers=compositional_mode,
 )
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
+
+def verify_first_training_batch(x, y):
+    """Log and validate the first batch so tokenizer mode mistakes are obvious."""
+    if not compositional_mode:
+        if hasattr(x, "modifiers") or hasattr(y, "modifiers"):
+            raise RuntimeError("Plain BPE mode received modifier-bearing batches.")
+        print0(f"First train batch: ids={tuple(x.shape)}, targets={tuple(y.shape)}, modifiers=none")
+        return
+
+    if not hasattr(x, "ids") or not hasattr(y, "ids") or x.modifiers is None or y.modifiers is None:
+        raise RuntimeError("CoBPE mode expected EncodedBatch inputs and targets with modifier tensors.")
+    expected_shape = (*x.ids.shape, len(modifier_group_sizes))
+    if tuple(x.modifiers.shape) != expected_shape:
+        raise RuntimeError(f"Input modifier shape mismatch: got {tuple(x.modifiers.shape)}, expected {expected_shape}")
+    target_expected_shape = (*y.ids.shape, len(modifier_group_sizes))
+    if tuple(y.modifiers.shape) != target_expected_shape:
+        raise RuntimeError(f"Target modifier shape mismatch: got {tuple(y.modifiers.shape)}, expected {target_expected_shape}")
+    if model_config.modifier_group_sizes != modifier_group_sizes:
+        raise RuntimeError(
+            "Model/tokenizer modifier group mismatch: "
+            f"model={model_config.modifier_group_sizes}, tokenizer={modifier_group_sizes}"
+        )
+
+    default = torch.tensor(tokenizer.get_default_modifier(), dtype=x.modifiers.dtype, device=x.modifiers.device)
+    nondefault = x.modifiers != default.view(1, 1, -1)
+    nondefault_fields = int(nondefault.sum().item())
+    nondefault_rows = int(nondefault.any(dim=-1).sum().item())
+    total_rows = int(x.modifiers.shape[0] * x.modifiers.shape[1])
+    group_names = list(getattr(getattr(tokenizer, "spec", None), "group_names", []))
+    if not group_names:
+        group_names = [f"group_{i}" for i in range(len(modifier_group_sizes))]
+    group_counts = nondefault.sum(dim=(0, 1)).detach().cpu().tolist()
+    group_summary = ", ".join(f"{name}={int(count)}" for name, count in zip(group_names, group_counts))
+    print0(
+        "First CoBPE train batch: "
+        f"ids={tuple(x.ids.shape)}, modifiers={tuple(x.modifiers.shape)}, "
+        f"non-default rows={nondefault_rows}/{total_rows}, non-default fields={nondefault_fields}"
+    )
+    print0(f"First CoBPE train batch non-default fields by group: {group_summary}")
+    if nondefault_rows == 0:
+        print0("WARNING: first CoBPE train batch contains only default modifiers; check tokenizer/data if this persists.")
+
+verify_first_training_batch(x, y)
 
 # -----------------------------------------------------------------------------
 # Calculate the number of iterations we will train for and set up the various schedulers

@@ -9,6 +9,7 @@ import torch
 from nanochat.tokenizer import RustBPETokenizer, get_tokenizer
 from nanochat.cobpe.training import (
     normalize_cobpe_training_text,
+    remove_cobpe_metadata,
     save_cobpe_metadata,
     train_cobpe_tokenizer,
 )
@@ -73,6 +74,10 @@ if args.cobpe:
     metadata_path, config_path = save_cobpe_metadata(tokenizer_dir, cobpe_report)
     print(f"Saved CoBPE metadata to {metadata_path}")
     print(f"Saved CoBPE build config to {config_path}")
+else:
+    removed_paths = remove_cobpe_metadata(tokenizer_dir)
+    for path in removed_paths:
+        print(f"Removed stale CoBPE metadata from BPE tokenizer directory: {path}")
 
 # -----------------------------------------------------------------------------
 # Quick inline sanity check
