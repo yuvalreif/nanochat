@@ -40,6 +40,9 @@ class GPTConfig:
     window_pattern: str = "SSSL"
     modifier_group_sizes: tuple[int, ...] = ()
     modifier_loss_weight: float = 1.0
+    # Experimental CoBPE-only toggles. Regular BPE keeps these architecture tricks on.
+    cobpe_smear: bool = False
+    cobpe_backout: bool = False
 
 
 def norm(x):
@@ -181,16 +184,19 @@ class GPT(nn.Module):
         # the modifier values after the base token has been selected.
         modifier_group_sizes = tuple(int(v) for v in (config.modifier_group_sizes or ()))
         self.cobpe = CoBPEModule(modifier_group_sizes, config.n_embd, Linear) if modifier_group_sizes else None
+        self.use_smear = self.cobpe is None or bool(config.cobpe_smear)
+        self.use_backout = self.cobpe is None or bool(config.cobpe_backout)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
         # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
         # Separate parameters so they can have different optimizer treatment
         self.resid_lambdas = nn.Parameter(torch.ones(config.n_layer))   # fake init, real init in init_weights()
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))     # fake init, real init in init_weights()
-        if self.cobpe is None:
+        if self.use_smear:
             # Smear: mix previous token's embedding into current token (cheap bigram-like info)
             self.smear_gate = Linear(24, 1, bias=False)
             self.smear_lambda = nn.Parameter(torch.zeros(1))
+        if self.use_backout:
             # Backout: subtract cached mid-layer residual before final norm to remove low-level features
             self.backout_lambda = nn.Parameter(0.2 * torch.ones(1))
         # Value embeddings (ResFormer-style): alternating layers, last layer always included
@@ -249,11 +255,12 @@ class GPT(nn.Module):
         for i in range(n_layer):
             self.x0_lambdas.data[i] = 0.20 - (0.15 * i / max(n_layer - 1, 1))
 
-        if self.cobpe is None:
-            # Smear/backout scalars and smear gate must be explicitly initialized
+        if self.use_smear:
+            # Smear parameters must be explicitly initialized.
             torch.nn.init.zeros_(self.smear_lambda)
-            torch.nn.init.constant_(self.backout_lambda, 0.2)
             torch.nn.init.uniform_(self.smear_gate.weight, 0.0, 0.02)
+        if self.use_backout:
+            torch.nn.init.constant_(self.backout_lambda, 0.2)
 
         # Value embeddings (init like c_v: uniform with same std)
         for ve in self.value_embeds.values():
@@ -344,7 +351,11 @@ class GPT(nn.Module):
         # Exclude non-matmul params: embeddings and per-layer scalars
         modifier_embeds_numel = 0 if self.cobpe is None else self.cobpe.embed.weight.numel()
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
-        smear_numel = 0 if self.cobpe is not None else (self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel())
+        smear_numel = 0
+        if self.use_smear:
+            smear_numel += self.smear_gate.weight.numel() + self.smear_lambda.numel()
+        if self.use_backout:
+            smear_numel += self.backout_lambda.numel()
         nparams_exclude = (self.transformer.wte.weight.numel() + modifier_embeds_numel + value_embeds_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel() + smear_numel)
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
@@ -376,7 +387,11 @@ class GPT(nn.Module):
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        smear_scalars = 0 if self.cobpe is not None else (self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel())
+        smear_scalars = 0
+        if self.use_smear:
+            smear_scalars += self.smear_gate.weight.numel() + self.smear_lambda.numel()
+        if self.use_backout:
+            smear_scalars += self.backout_lambda.numel()
         scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + smear_scalars
         total = wte + modifier_embeds + modifier_conditioners + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
@@ -404,7 +419,11 @@ class GPT(nn.Module):
             lm_head_params += list(self.cobpe.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
-        smear_params = [] if self.cobpe is not None else [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
+        smear_params = []
+        if self.use_smear:
+            smear_params.extend([self.smear_gate.weight, self.smear_lambda])
+        if self.use_backout:
+            smear_params.append(self.backout_lambda)
         assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
@@ -478,7 +497,7 @@ class GPT(nn.Module):
         x = norm(x)
 
         # Smear: mix previous token's embedding into current position (cheap bigram info)
-        if self.cobpe is None:
+        if self.use_smear:
             if kv_cache is None:
                 # Training / naive generate: full sequence available, use fast slice
                 assert T > 1, "Training forward pass should have T > 1"
@@ -500,7 +519,7 @@ class GPT(nn.Module):
         # Forward the trunk of the Transformer
         x0 = x  # save initial normalized embedding for x0 residual
         n_layer = self.config.n_layer
-        backout_layer = n_layer // 2 if self.cobpe is None else -1  # cache at halfway point
+        backout_layer = n_layer // 2 if self.use_backout else -1  # cache at halfway point
         x_backout = None
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
@@ -509,7 +528,7 @@ class GPT(nn.Module):
             if i == backout_layer:
                 x_backout = x
         # Subtract mid-layer residual to remove low-level features before logit projection
-        if self.cobpe is None and x_backout is not None:
+        if self.use_backout and x_backout is not None:
             x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = norm(x)
 

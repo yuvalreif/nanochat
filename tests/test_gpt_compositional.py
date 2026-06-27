@@ -6,7 +6,7 @@ from nanochat.cobpe.model import CoBPEModule
 from nanochat.gpt import GPT, GPTConfig, Linear
 
 
-def _build_model(*, modifier_group_sizes=(), n_layer=2):
+def _build_model(*, modifier_group_sizes=(), n_layer=2, cobpe_smear=False, cobpe_backout=False):
     cfg = GPTConfig(
         sequence_len=8,
         vocab_size=32,
@@ -17,6 +17,8 @@ def _build_model(*, modifier_group_sizes=(), n_layer=2):
         window_pattern="L",
         modifier_group_sizes=tuple(modifier_group_sizes),
         modifier_loss_weight=1.0,
+        cobpe_smear=cobpe_smear,
+        cobpe_backout=cobpe_backout,
     )
     with torch.device("meta"):
         model = GPT(cfg)
@@ -103,6 +105,28 @@ def test_gpt_compositional_skips_smear():
     assert torch.allclose(capture.inputs[0], composed, atol=1e-5, rtol=1e-5)
 
 
+def test_gpt_compositional_can_enable_smear():
+    model = _build_model(modifier_group_sizes=(3, 4), cobpe_smear=True)
+    capture = _CaptureBlock()
+    model.transformer.h = nn.ModuleList([capture, _CaptureBlock()])
+    with torch.no_grad():
+        model.resid_lambdas.fill_(1.0)
+        model.x0_lambdas.zero_()
+        model.smear_lambda.fill_(1.0)
+        model.smear_gate.weight.zero_()
+    assert hasattr(model, "smear_lambda")
+    assert hasattr(model, "smear_gate")
+    assert not hasattr(model, "backout_lambda")
+
+    ids = torch.tensor([[2, 5, 7]], dtype=torch.long)
+    modifier_ids = torch.tensor([[[1, 2], [2, 3], [0, 1]]], dtype=torch.long)
+    model(ids, modifier_ids=modifier_ids, return_hidden_only=True)
+
+    base = _norm(model.transformer.wte(ids) + model.cobpe.embed_sum(modifier_ids))
+    expected = torch.cat([base[:, :1], base[:, 1:] + 0.5 * base[:, :-1]], dim=1)
+    assert torch.allclose(capture.inputs[0], expected, atol=1e-5, rtol=1e-5)
+
+
 def test_gpt_baseline_backout_still_runs_for_regular_bpe():
     model = _build_model(n_layer=3)
     delta = torch.linspace(-0.5, 0.5, model.config.n_embd).view(1, 1, -1)
@@ -147,12 +171,46 @@ def test_gpt_compositional_skips_backout():
     assert torch.allclose(logits, expected_logits, atol=1e-5, rtol=1e-5)
 
 
+def test_gpt_compositional_can_enable_backout():
+    model = _build_model(modifier_group_sizes=(3, 4), n_layer=3, cobpe_backout=True)
+    delta = torch.linspace(-0.5, 0.5, model.config.n_embd).view(1, 1, -1)
+    model.transformer.h = nn.ModuleList([_CaptureBlock(), _CaptureBlock(), _CaptureBlock(delta)])
+    with torch.no_grad():
+        model.resid_lambdas.fill_(1.0)
+        model.x0_lambdas.zero_()
+        model.backout_lambda.fill_(0.5)
+    assert not hasattr(model, "smear_lambda")
+    assert hasattr(model, "backout_lambda")
+
+    ids = torch.tensor([[2, 5, 7]], dtype=torch.long)
+    modifier_ids = torch.tensor([[[1, 2], [2, 3], [0, 1]]], dtype=torch.long)
+    logits, hidden = model(ids, modifier_ids=modifier_ids, return_hidden=True)
+
+    trunk_input = _norm(model.transformer.wte(ids) + model.cobpe.embed_sum(modifier_ids))
+    expected_hidden = _norm(trunk_input + delta - 0.5 * trunk_input)
+
+    assert torch.allclose(hidden, expected_hidden, atol=1e-5, rtol=1e-5)
+    expected_logits = model.lm_head(expected_hidden)[..., :model.config.vocab_size].float()
+    expected_logits = 15 * torch.tanh(expected_logits / 15)
+    assert torch.allclose(logits, expected_logits, atol=1e-5, rtol=1e-5)
+
+
 def test_gpt_compositional_has_no_smear_backout_params():
     model = _build_model(modifier_group_sizes=(3, 4))
     assert not hasattr(model, "smear_gate")
     assert not hasattr(model, "smear_lambda")
     assert not hasattr(model, "backout_lambda")
     assert model.estimate_flops() > 0
+    params = model.num_scaling_params()
+    assert params["total"] == sum(p.numel() for p in model.parameters())
+    model.setup_optimizer()
+
+
+def test_gpt_compositional_smear_backout_params_are_optional():
+    model = _build_model(modifier_group_sizes=(3, 4), cobpe_smear=True, cobpe_backout=True)
+    assert hasattr(model, "smear_gate")
+    assert hasattr(model, "smear_lambda")
+    assert hasattr(model, "backout_lambda")
     params = model.num_scaling_params()
     assert params["total"] == sum(p.numel() for p in model.parameters())
     model.setup_optimizer()

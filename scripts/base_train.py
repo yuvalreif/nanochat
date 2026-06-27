@@ -52,6 +52,8 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--cobpe-smear", action="store_true", help="enable the smear architecture trick for CoBPE models")
+parser.add_argument("--cobpe-backout", action="store_true", help="enable the backout architecture trick for CoBPE models")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -77,12 +79,7 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
-# Tokenizer guardrails
-parser.add_argument("--require-cobpe", action="store_true", help="fail unless the loaded tokenizer is running in CoBPE/compositional mode")
-parser.add_argument("--forbid-cobpe", action="store_true", help="fail if the loaded tokenizer is running in CoBPE/compositional mode")
 args = parser.parse_args()
-if args.require_cobpe and args.forbid_cobpe:
-    raise ValueError("--require-cobpe and --forbid-cobpe are mutually exclusive")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -144,13 +141,12 @@ print0(
 )
 if os.path.exists(cobpe_config_path):
     print0(f"CoBPE build config: {cobpe_config_path}")
-if args.require_cobpe and not compositional_mode:
-    raise RuntimeError("--require-cobpe was set, but the tokenizer loaded as plain BPE.")
-if args.forbid_cobpe and compositional_mode:
-    raise RuntimeError("--forbid-cobpe was set, but the tokenizer loaded as CoBPE/compositional.")
+if not compositional_mode and (args.cobpe_smear or args.cobpe_backout):
+    raise RuntimeError("--cobpe-smear and --cobpe-backout require a CoBPE/compositional tokenizer.")
 if compositional_mode:
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
     print0("Compositional tokenizer backend: rustbpe")
+    print0(f"CoBPE architecture tricks: smear={args.cobpe_smear}, backout={args.cobpe_backout}")
 else:
     print0("Compositional mode disabled; training plain BPE token ids only.")
 
@@ -169,6 +165,8 @@ def build_model_meta(depth):
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern,
         modifier_group_sizes=modifier_group_sizes,
+        cobpe_smear=args.cobpe_smear,
+        cobpe_backout=args.cobpe_backout,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
