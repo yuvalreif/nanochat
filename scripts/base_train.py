@@ -54,6 +54,8 @@ parser.add_argument("--max-seq-len", type=int, default=2048, help="max context l
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
 parser.add_argument("--cobpe-smear", action="store_true", help="enable the smear architecture trick for CoBPE models")
 parser.add_argument("--cobpe-backout", action="store_true", help="enable the backout architecture trick for CoBPE models")
+parser.add_argument("--cobpe-smear-backout-scope", type=str, default="full", choices=["full", "base"], help="apply CoBPE smear/backout to the full base+modifier representation or base-token representation only")
+parser.add_argument("--cobpe-modifier-conditioning", type=str, default="mlp", choices=["mlp", "concat_gated"], help="modifier prediction conditioning mode for CoBPE models")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -141,12 +143,25 @@ print0(
 )
 if os.path.exists(cobpe_config_path):
     print0(f"CoBPE build config: {cobpe_config_path}")
-if not compositional_mode and (args.cobpe_smear or args.cobpe_backout):
-    raise RuntimeError("--cobpe-smear and --cobpe-backout require a CoBPE/compositional tokenizer.")
+if not compositional_mode and (
+    args.cobpe_smear
+    or args.cobpe_backout
+    or args.cobpe_smear_backout_scope != "full"
+    or args.cobpe_modifier_conditioning != "mlp"
+):
+    raise RuntimeError(
+        "--cobpe-smear, --cobpe-backout, --cobpe-smear-backout-scope, "
+        "and --cobpe-modifier-conditioning require a CoBPE/compositional tokenizer."
+    )
 if compositional_mode:
     print0(f"Compositional mode enabled with modifier groups: {list(modifier_group_sizes)}")
     print0("Compositional tokenizer backend: rustbpe")
-    print0(f"CoBPE architecture tricks: smear={args.cobpe_smear}, backout={args.cobpe_backout}")
+    print0(
+        "CoBPE architecture tricks: "
+        f"smear={args.cobpe_smear}, backout={args.cobpe_backout}, "
+        f"smear_backout_scope={args.cobpe_smear_backout_scope}, "
+        f"modifier_conditioning={args.cobpe_modifier_conditioning}"
+    )
 else:
     print0("Compositional mode disabled; training plain BPE token ids only.")
 
@@ -167,6 +182,8 @@ def build_model_meta(depth):
         modifier_group_sizes=modifier_group_sizes,
         cobpe_smear=args.cobpe_smear,
         cobpe_backout=args.cobpe_backout,
+        cobpe_smear_backout_scope=args.cobpe_smear_backout_scope,
+        cobpe_modifier_conditioning=args.cobpe_modifier_conditioning,
     )
     with torch.device("meta"):
         model_meta = GPT(config)

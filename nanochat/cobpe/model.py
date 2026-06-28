@@ -18,12 +18,26 @@ class CoBPEModule(nn.Module):
     Add modifier embeddings to base-token inputs and predict modifier values.
 
     CoBPE first predicts a regular BPE token. Its hidden state and the selected
-    base-token unembedding then condition a small MLP that predicts one value
-    independently for each modifier group.
+    base-token unembedding then condition a modifier head that predicts one
+    value independently for each modifier group.
     """
 
-    def __init__(self, group_sizes, n_embd, linear_cls, pad_total_size_to=64, pad_refine_dim_to=64):
+    def __init__(
+        self,
+        group_sizes,
+        n_embd,
+        linear_cls,
+        pad_total_size_to=64,
+        pad_refine_dim_to=64,
+        conditioning_mode="mlp",
+    ):
         super().__init__()
+        self.conditioning_mode = str(conditioning_mode).lower()
+        if self.conditioning_mode not in {"mlp", "concat_gated"}:
+            raise ValueError(
+                f"Unsupported CoBPE modifier conditioning_mode={conditioning_mode!r}. "
+                "Expected one of: mlp, concat_gated."
+            )
         self.group_sizes = tuple(int(size) for size in group_sizes)
         self.num_groups = len(self.group_sizes)
         self.total_size = sum(self.group_sizes)
@@ -37,17 +51,40 @@ class CoBPEModule(nn.Module):
         # AdamW reduce_scatter shards on dim 0, so keep modifier matrices shard-friendly.
         refine_dim = min(n_embd, _round_up(max(32, 4 * self.total_size), pad_refine_dim_to))
         self.embed = nn.Embedding(self.padded_total_size, n_embd)
-        self.refine_fc = linear_cls(2 * n_embd, refine_dim, bias=False)
-        self.refine_out = linear_cls(refine_dim, self.padded_total_size, bias=False)
+        self.refine_fc = None
+        self.refine_out = None
+        self.hidden_head = None
+        self.base_proj = None
+        self.gate = None
+        if self.conditioning_mode == "mlp":
+            self.refine_fc = linear_cls(2 * n_embd, refine_dim, bias=False)
+            self.refine_out = linear_cls(refine_dim, self.padded_total_size, bias=False)
+        elif self.conditioning_mode == "concat_gated":
+            self.hidden_head = linear_cls(n_embd, self.padded_total_size, bias=False)
+            self.base_proj = linear_cls(n_embd, self.padded_total_size, bias=False)
+            self.gate = linear_cls(n_embd, 1, bias=False)
 
     @torch.no_grad()
     def init_weights(self):
         torch.nn.init.normal_(self.embed.weight, mean=0.0, std=0.8)
-        torch.nn.init.normal_(self.refine_fc.weight, mean=0.0, std=0.001)
-        torch.nn.init.normal_(self.refine_out.weight, mean=0.0, std=0.001)
+        if self.refine_fc is not None:
+            torch.nn.init.normal_(self.refine_fc.weight, mean=0.0, std=0.001)
+        if self.refine_out is not None:
+            torch.nn.init.normal_(self.refine_out.weight, mean=0.0, std=0.001)
+        if self.hidden_head is not None:
+            torch.nn.init.normal_(self.hidden_head.weight, mean=0.0, std=0.001)
+        if self.base_proj is not None:
+            torch.nn.init.normal_(self.base_proj.weight, mean=0.0, std=0.001)
+        if self.gate is not None:
+            torch.nn.init.zeros_(self.gate.weight)
         if self.padded_total_size > self.total_size:
             self.embed.weight[self.total_size:].zero_()
-            self.refine_out.weight[self.total_size:].zero_()
+            if self.refine_out is not None:
+                self.refine_out.weight[self.total_size:].zero_()
+            if self.hidden_head is not None:
+                self.hidden_head.weight[self.total_size:].zero_()
+            if self.base_proj is not None:
+                self.base_proj.weight[self.total_size:].zero_()
 
     def _offset_ids(self, modifier_ids):
         if modifier_ids.dim() != 3:
@@ -75,8 +112,18 @@ class CoBPEModule(nn.Module):
             raise ValueError(f"token_ids must match hidden shape: {tuple(token_ids.shape)} != {tuple(hidden.shape[:2])}")
         hidden_flat = hidden.view(-1, hidden.size(-1))
         base_rep = F.embedding(token_ids.view(-1).long(), base_unembedding).to(dtype=hidden_flat.dtype)
-        refine_in = torch.cat([_norm(hidden_flat), _norm(base_rep)], dim=-1)
-        all_logits = self.refine_out(F.silu(self.refine_fc(refine_in)))
+        if self.conditioning_mode == "mlp":
+            refine_in = torch.cat([_norm(hidden_flat), _norm(base_rep)], dim=-1)
+            all_logits = self.refine_out(F.silu(self.refine_fc(refine_in)))
+        elif self.conditioning_mode == "concat_gated":
+            hidden_logits = self.hidden_head(_norm(hidden_flat))
+            base_logits = self.base_proj(_norm(base_rep))
+            gate = torch.sigmoid(self.gate(hidden_flat))
+            if gate.dtype != base_logits.dtype:
+                gate = gate.to(dtype=base_logits.dtype)
+            all_logits = hidden_logits + gate * base_logits
+        else:
+            raise ValueError(f"Unknown CoBPE modifier conditioning_mode: {self.conditioning_mode}")
         outputs = []
         for group_idx, group_size in enumerate(self.group_sizes):
             start = self.group_offsets[group_idx]

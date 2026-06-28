@@ -43,6 +43,8 @@ class GPTConfig:
     # Experimental CoBPE-only toggles. Regular BPE keeps these architecture tricks on.
     cobpe_smear: bool = False
     cobpe_backout: bool = False
+    cobpe_smear_backout_scope: str = "full"
+    cobpe_modifier_conditioning: str = "mlp"
 
 
 def norm(x):
@@ -183,9 +185,20 @@ class GPT(nn.Module):
         # embeddings are summed into the input, and a small conditioned head predicts
         # the modifier values after the base token has been selected.
         modifier_group_sizes = tuple(int(v) for v in (config.modifier_group_sizes or ()))
-        self.cobpe = CoBPEModule(modifier_group_sizes, config.n_embd, Linear) if modifier_group_sizes else None
+        self.cobpe = CoBPEModule(
+            modifier_group_sizes,
+            config.n_embd,
+            Linear,
+            conditioning_mode=config.cobpe_modifier_conditioning,
+        ) if modifier_group_sizes else None
         self.use_smear = self.cobpe is None or bool(config.cobpe_smear)
         self.use_backout = self.cobpe is None or bool(config.cobpe_backout)
+        self.cobpe_smear_backout_scope = str(config.cobpe_smear_backout_scope).lower()
+        if self.cobpe_smear_backout_scope not in {"full", "base"}:
+            raise ValueError(
+                f"Unsupported cobpe_smear_backout_scope={config.cobpe_smear_backout_scope!r}. "
+                "Expected one of: full, base."
+            )
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
         # x0_lambdas: blends initial embedding back in at each layer (init 0.0 = disabled)
@@ -383,7 +396,7 @@ class GPT(nn.Module):
         # Count each group separately (mirrors the grouping in setup_optimizers)
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         modifier_embeds = 0 if self.cobpe is None else sum(p.numel() for p in self.cobpe.embed.parameters())
-        modifier_conditioners = 0 if self.cobpe is None else sum(p.numel() for p in self.cobpe.refine_fc.parameters()) + sum(p.numel() for p in self.cobpe.refine_out.parameters())
+        modifier_conditioners = 0 if self.cobpe is None else sum(p.numel() for p in self.cobpe.parameters()) - sum(p.numel() for p in self.cobpe.embed.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
@@ -487,34 +500,48 @@ class GPT(nn.Module):
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
-        # Embed the tokens
-        x = self.transformer.wte(idx) # embed current token
-        if modifier_ids is not None:
-            if self.cobpe is None:
-                raise ValueError("modifier_ids were provided but the model has no modifier groups configured.")
-            x = x + self.cobpe.embed_sum(modifier_ids).to(dtype=x.dtype)
-        x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
-        x = norm(x)
-
-        # Smear: mix previous token's embedding into current position (cheap bigram info)
-        if self.use_smear:
+        def apply_smear(x):
+            if not self.use_smear:
+                return x
             if kv_cache is None:
                 # Training / naive generate: full sequence available, use fast slice
                 assert T > 1, "Training forward pass should have T > 1"
                 gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
-                x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
-            else:
-                # KV cache inference: read prev embedding from cache, store current for next step
-                x_pre_smear = kv_cache.prev_embedding
-                kv_cache.prev_embedding = x[:, -1:, :]
-                if T > 1:
-                    # Prefill: apply smear to positions 1+, same as training
-                    gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
-                    x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
-                elif x_pre_smear is not None:
-                    # Decode: single token, use cached prev embedding
-                    gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, :, :24]))
-                    x = x + gate * x_pre_smear
+                return torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
+            # KV cache inference: read prev embedding from cache, store current for next step
+            x_pre_smear = kv_cache.prev_embedding
+            kv_cache.prev_embedding = x[:, -1:, :]
+            if T > 1:
+                # Prefill: apply smear to positions 1+, same as training
+                gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
+                return torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
+            if x_pre_smear is not None:
+                # Decode: single token, use cached prev embedding
+                gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, :, :24]))
+                return x + gate * x_pre_smear
+            return x
+
+        # Embed the tokens
+        base_x = self.transformer.wte(idx) # embed current token
+        modifier_embed = None
+        if modifier_ids is not None:
+            if self.cobpe is None:
+                raise ValueError("modifier_ids were provided but the model has no modifier groups configured.")
+            modifier_embed = self.cobpe.embed_sum(modifier_ids)
+
+        smear_base_only = self.cobpe is not None and self.cobpe_smear_backout_scope == "base" and self.use_smear
+        if smear_base_only:
+            x = norm(base_x.to(COMPUTE_DTYPE))
+            x = apply_smear(x)
+            if modifier_embed is not None:
+                x = norm(x + modifier_embed.to(dtype=x.dtype))
+        else:
+            x = base_x
+            if modifier_embed is not None:
+                x = x + modifier_embed.to(dtype=x.dtype)
+            x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
+            x = norm(x)
+            x = apply_smear(x)
 
         # Forward the trunk of the Transformer
         x0 = x  # save initial normalized embedding for x0 residual
@@ -528,16 +555,25 @@ class GPT(nn.Module):
             if i == backout_layer:
                 x_backout = x
         # Subtract mid-layer residual to remove low-level features before logit projection
+        trunk_x = x
         if self.use_backout and x_backout is not None:
-            x = x - self.backout_lambda.to(x.dtype) * x_backout
-        x = norm(x)
+            base_x = x - self.backout_lambda.to(x.dtype) * x_backout
+            if self.cobpe is not None and self.cobpe_smear_backout_scope == "base":
+                modifier_x = trunk_x
+            else:
+                modifier_x = base_x
+        else:
+            base_x = x
+            modifier_x = x
+        base_x = norm(base_x)
+        modifier_x = norm(modifier_x)
 
         if return_hidden_only:
-            return x
+            return modifier_x
 
         # Forward the lm_head (compute logits)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
-        logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
+        logits = self.lm_head(base_x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., :self.config.vocab_size] # slice to remove padding
         logits = logits.float() # switch to fp32 for logit softcap and loss computation
         logits = softcap * torch.tanh(logits / softcap) # squash the logits
@@ -546,16 +582,16 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
-            modifier_loss = self._modifier_loss(x, targets, target_modifier_ids, loss_reduction)
+            modifier_loss = self._modifier_loss(modifier_x, targets, target_modifier_ids, loss_reduction)
             if modifier_loss is not None:
                 loss = loss + float(self.config.modifier_loss_weight) * modifier_loss
             if return_hidden:
-                return loss, x
+                return loss, modifier_x
             return loss
         else:
             # inference: just return the logits directly
             if return_hidden:
-                return logits, x
+                return logits, modifier_x
             return logits
 
     @torch.inference_mode()
