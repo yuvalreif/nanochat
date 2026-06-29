@@ -33,10 +33,10 @@ class CoBPEModule(nn.Module):
     ):
         super().__init__()
         self.conditioning_mode = str(conditioning_mode).lower()
-        if self.conditioning_mode not in {"mlp", "concat_gated"}:
+        if self.conditioning_mode not in {"mlp", "concat_gated", "concat_gated_refine"}:
             raise ValueError(
                 f"Unsupported CoBPE modifier conditioning_mode={conditioning_mode!r}. "
-                "Expected one of: mlp, concat_gated."
+                "Expected one of: mlp, concat_gated, concat_gated_refine."
             )
         self.group_sizes = tuple(int(size) for size in group_sizes)
         self.num_groups = len(self.group_sizes)
@@ -56,15 +56,18 @@ class CoBPEModule(nn.Module):
         self.hidden_head = None
         self.base_proj = None
         self.gate = None
+        self.logit_refine = None
         self.gate_size = 0
         if self.conditioning_mode == "mlp":
             self.refine_fc = linear_cls(2 * n_embd, refine_dim, bias=False)
             self.refine_out = linear_cls(refine_dim, self.padded_total_size, bias=False)
-        elif self.conditioning_mode == "concat_gated":
+        elif self.conditioning_mode in {"concat_gated", "concat_gated_refine"}:
             self.hidden_head = linear_cls(n_embd, self.padded_total_size, bias=False)
             self.base_proj = linear_cls(n_embd, self.padded_total_size, bias=False)
             self.gate_size = 8
             self.gate = linear_cls(n_embd, self.gate_size, bias=False)
+            if self.conditioning_mode == "concat_gated_refine":
+                self.logit_refine = linear_cls(self.padded_total_size, self.padded_total_size, bias=False)
 
     @torch.no_grad()
     def init_weights(self):
@@ -79,6 +82,8 @@ class CoBPEModule(nn.Module):
             torch.nn.init.normal_(self.base_proj.weight, mean=0.0, std=0.001)
         if self.gate is not None:
             torch.nn.init.zeros_(self.gate.weight)
+        if self.logit_refine is not None:
+            torch.nn.init.zeros_(self.logit_refine.weight)
         if self.padded_total_size > self.total_size:
             self.embed.weight[self.total_size:].zero_()
             if self.refine_out is not None:
@@ -87,6 +92,8 @@ class CoBPEModule(nn.Module):
                 self.hidden_head.weight[self.total_size:].zero_()
             if self.base_proj is not None:
                 self.base_proj.weight[self.total_size:].zero_()
+            if self.logit_refine is not None:
+                self.logit_refine.weight[self.total_size:].zero_()
 
     def _offset_ids(self, modifier_ids):
         if modifier_ids.dim() != 3:
@@ -117,13 +124,15 @@ class CoBPEModule(nn.Module):
         if self.conditioning_mode == "mlp":
             refine_in = torch.cat([_norm(hidden_flat), _norm(base_rep)], dim=-1)
             all_logits = self.refine_out(F.silu(self.refine_fc(refine_in)))
-        elif self.conditioning_mode == "concat_gated":
+        elif self.conditioning_mode in {"concat_gated", "concat_gated_refine"}:
             hidden_logits = self.hidden_head(_norm(hidden_flat))
             base_logits = self.base_proj(_norm(base_rep))
             gate = torch.sigmoid(self.gate(hidden_flat)[:, :1])
             if gate.dtype != base_logits.dtype:
                 gate = gate.to(dtype=base_logits.dtype)
             all_logits = hidden_logits + gate * base_logits
+            if self.conditioning_mode == "concat_gated_refine":
+                all_logits = all_logits + self.logit_refine(F.silu(all_logits))
         else:
             raise ValueError(f"Unknown CoBPE modifier conditioning_mode: {self.conditioning_mode}")
         outputs = []

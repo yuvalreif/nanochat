@@ -55,7 +55,7 @@ parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding 
 parser.add_argument("--cobpe-smear", action="store_true", help="enable the smear architecture trick for CoBPE models")
 parser.add_argument("--cobpe-backout", action="store_true", help="enable the backout architecture trick for CoBPE models")
 parser.add_argument("--cobpe-smear-backout-scope", type=str, default="full", choices=["full", "base"], help="apply CoBPE smear/backout to the full base+modifier representation or base-token representation only")
-parser.add_argument("--cobpe-modifier-conditioning", type=str, default="mlp", choices=["mlp", "concat_gated"], help="modifier prediction conditioning mode for CoBPE models")
+parser.add_argument("--cobpe-modifier-conditioning", type=str, default="mlp", choices=["mlp", "concat_gated", "concat_gated_refine"], help="modifier prediction conditioning mode for CoBPE models")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")

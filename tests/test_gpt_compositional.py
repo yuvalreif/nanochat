@@ -350,6 +350,32 @@ def test_gpt_compositional_concat_gated_modifier_conditioning():
     assert [group_logits.shape for group_logits in logits] == [(2, 8, 3), (2, 8, 4)]
 
 
+def test_gpt_compositional_concat_gated_refine_modifier_conditioning():
+    model = _build_model(modifier_group_sizes=(3, 4), cobpe_modifier_conditioning="concat_gated_refine")
+    assert model.cobpe.conditioning_mode == "concat_gated_refine"
+    assert model.cobpe.refine_fc is None
+    assert model.cobpe.refine_out is None
+    assert model.cobpe.hidden_head.weight.shape == (64, model.config.n_embd)
+    assert model.cobpe.base_proj.weight.shape == (64, model.config.n_embd)
+    assert model.cobpe.gate.weight.shape == (8, model.config.n_embd)
+    assert model.cobpe.logit_refine.weight.shape == (64, 64)
+    assert torch.equal(model.cobpe.logit_refine.weight, torch.zeros_like(model.cobpe.logit_refine.weight))
+
+    ids = torch.randint(0, 32, (2, 8), dtype=torch.long)
+    modifier_ids = torch.stack(
+        [
+            torch.randint(0, 3, (2, 8), dtype=torch.long),
+            torch.randint(0, 4, (2, 8), dtype=torch.long),
+        ],
+        dim=-1,
+    )
+    loss = model(ids, ids, modifier_ids=modifier_ids, target_modifier_ids=modifier_ids)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+    logits = model.get_modifier_logits(torch.randn(2, 8, model.config.n_embd), ids)
+    assert [group_logits.shape for group_logits in logits] == [(2, 8, 3), (2, 8, 4)]
+
+
 def test_cobpe_canonical_modifier_head_pads_refine_dim_for_adamw_sharding():
     module = CoBPEModule((31, 30), 768, Linear)
     assert module.refine_fc.out_features == 256
@@ -363,6 +389,16 @@ def test_cobpe_concat_gated_modifier_head_pads_for_adamw_sharding():
     assert module.hidden_head.weight.shape == (64, 768)
     assert module.base_proj.weight.shape == (64, 768)
     assert module.gate.weight.shape == (8, 768)
+    assert module.refine_fc is None
+    assert module.refine_out is None
+
+
+def test_cobpe_concat_gated_refine_modifier_head_pads_for_adamw_sharding():
+    module = CoBPEModule((31, 30), 768, Linear, conditioning_mode="concat_gated_refine")
+    assert module.hidden_head.weight.shape == (64, 768)
+    assert module.base_proj.weight.shape == (64, 768)
+    assert module.gate.weight.shape == (8, 768)
+    assert module.logit_refine.weight.shape == (64, 64)
     assert module.refine_fc is None
     assert module.refine_out is None
 
@@ -413,6 +449,18 @@ def test_gpt_concat_gated_adamw_params_are_8gpu_shardable():
                 assert param.shape[0] % 8 == 0
 
 
+def test_gpt_concat_gated_refine_adamw_params_are_8gpu_shardable():
+    model = _build_model(modifier_group_sizes=(31, 30), cobpe_modifier_conditioning="concat_gated_refine")
+    optimizer = model.setup_optimizer()
+
+    for group in optimizer.param_groups:
+        if group["kind"] != "adamw":
+            continue
+        for param in group["params"]:
+            if param.numel() >= 1024 and param.ndim > 0:
+                assert param.shape[0] % 8 == 0
+
+
 def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
     model = _build_model(modifier_group_sizes=(3, 4))
     unembedding_lr = 0.004
@@ -451,6 +499,23 @@ def test_gpt_modifier_parameters_use_unembedding_optimizer_bucket():
 
 def test_gpt_concat_gated_modifier_parameters_use_unembedding_optimizer_bucket():
     model = _build_model(modifier_group_sizes=(3, 4), cobpe_modifier_conditioning="concat_gated")
+    optimizer = model.setup_optimizer()
+
+    def group_for(param):
+        for group in optimizer.param_groups:
+            if any(p is param for p in group["params"]):
+                return group
+        raise AssertionError("parameter not found in optimizer groups")
+
+    for param in model.cobpe.parameters():
+        group = group_for(param)
+        assert group["kind"] == "adamw"
+        assert group["betas"] == (0.8, 0.96)
+        assert group["weight_decay"] == 0.01
+
+
+def test_gpt_concat_gated_refine_modifier_parameters_use_unembedding_optimizer_bucket():
+    model = _build_model(modifier_group_sizes=(3, 4), cobpe_modifier_conditioning="concat_gated_refine")
     optimizer = model.setup_optimizer()
 
     def group_for(param):
