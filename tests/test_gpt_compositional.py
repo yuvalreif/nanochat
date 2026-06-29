@@ -333,7 +333,7 @@ def test_gpt_compositional_concat_gated_modifier_conditioning():
     assert model.cobpe.refine_out is None
     assert model.cobpe.hidden_head.weight.shape == (64, model.config.n_embd)
     assert model.cobpe.base_proj.weight.shape == (64, model.config.n_embd)
-    assert model.cobpe.gate.weight.shape == (1, model.config.n_embd)
+    assert model.cobpe.gate.weight.shape == (8, model.config.n_embd)
 
     ids = torch.randint(0, 32, (2, 8), dtype=torch.long)
     modifier_ids = torch.stack(
@@ -362,7 +362,7 @@ def test_cobpe_concat_gated_modifier_head_pads_for_adamw_sharding():
     module = CoBPEModule((31, 30), 768, Linear, conditioning_mode="concat_gated")
     assert module.hidden_head.weight.shape == (64, 768)
     assert module.base_proj.weight.shape == (64, 768)
-    assert module.gate.weight.shape == (1, 768)
+    assert module.gate.weight.shape == (8, 768)
     assert module.refine_fc is None
     assert module.refine_out is None
 
@@ -391,6 +391,18 @@ def test_cobpe_rejects_unknown_modifier_conditioning_mode():
 
 def test_gpt_compositional_adamw_params_are_8gpu_shardable():
     model = _build_model(modifier_group_sizes=(31, 30))
+    optimizer = model.setup_optimizer()
+
+    for group in optimizer.param_groups:
+        if group["kind"] != "adamw":
+            continue
+        for param in group["params"]:
+            if param.numel() >= 1024 and param.ndim > 0:
+                assert param.shape[0] % 8 == 0
+
+
+def test_gpt_concat_gated_adamw_params_are_8gpu_shardable():
+    model = _build_model(modifier_group_sizes=(31, 30), cobpe_modifier_conditioning="concat_gated")
     optimizer = model.setup_optimizer()
 
     for group in optimizer.param_groups:

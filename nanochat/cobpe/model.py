@@ -56,13 +56,15 @@ class CoBPEModule(nn.Module):
         self.hidden_head = None
         self.base_proj = None
         self.gate = None
+        self.gate_size = 0
         if self.conditioning_mode == "mlp":
             self.refine_fc = linear_cls(2 * n_embd, refine_dim, bias=False)
             self.refine_out = linear_cls(refine_dim, self.padded_total_size, bias=False)
         elif self.conditioning_mode == "concat_gated":
             self.hidden_head = linear_cls(n_embd, self.padded_total_size, bias=False)
             self.base_proj = linear_cls(n_embd, self.padded_total_size, bias=False)
-            self.gate = linear_cls(n_embd, 1, bias=False)
+            self.gate_size = 8
+            self.gate = linear_cls(n_embd, self.gate_size, bias=False)
 
     @torch.no_grad()
     def init_weights(self):
@@ -118,7 +120,7 @@ class CoBPEModule(nn.Module):
         elif self.conditioning_mode == "concat_gated":
             hidden_logits = self.hidden_head(_norm(hidden_flat))
             base_logits = self.base_proj(_norm(base_rep))
-            gate = torch.sigmoid(self.gate(hidden_flat))
+            gate = torch.sigmoid(self.gate(hidden_flat)[:, :1])
             if gate.dtype != base_logits.dtype:
                 gate = gate.to(dtype=base_logits.dtype)
             all_logits = hidden_logits + gate * base_logits
